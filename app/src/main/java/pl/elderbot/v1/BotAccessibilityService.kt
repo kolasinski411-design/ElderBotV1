@@ -52,52 +52,75 @@ class BotAccessibilityService : AccessibilityService() {
             return
         }
 
-        val displayId = display?.displayId ?: 0
-        takeScreenshot(
-            displayId,
-            mainExecutor,
-            object : TakeScreenshotCallback {
-                override fun onSuccess(screenshot: ScreenshotResult) {
-                    val buffer: HardwareBuffer = screenshot.hardwareBuffer
-                    try {
-                        val hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace as ColorSpace)
-                        if (hardwareBitmap == null) {
-                            lastStatus = "Nie udało się odczytać obrazu"
+        val displayId = android.view.Display.DEFAULT_DISPLAY
+        try {
+            takeScreenshot(
+                displayId,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        var bitmap: Bitmap? = null
+                        try {
+                            val buffer: HardwareBuffer = screenshot.hardwareBuffer
+                            try {
+                                val hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                                    ?: throw IllegalStateException("Bitmap jest pusty")
+                                bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                                hardwareBitmap.recycle()
+                            } finally {
+                                buffer.close()
+                            }
+
+                            val saved = bitmap?.let { saveBitmap(it) } == true
+                            lastStatus = if (saved) {
+                                "Zrzut zapisany: Pictures/ElderBot"
+                            } else {
+                                "Nie udało się zapisać zrzutu"
+                            }
+                            onDone(saved, lastStatus)
+                        } catch (e: Throwable) {
+                            lastStatus = "Błąd obsługi zrzutu: ${e.javaClass.simpleName}"
                             onDone(false, lastStatus)
-                            return
+                        } finally {
+                            bitmap?.recycle()
                         }
-                        val bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                        hardwareBitmap.recycle()
-                        val saved = saveBitmap(bitmap)
-                        bitmap.recycle()
-                        lastStatus = if (saved) "Zrzut zapisany: Pictures/ElderBot" else "Nie udało się zapisać zrzutu"
-                        onDone(saved, lastStatus)
-                    } finally {
-                        buffer.close()
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        lastStatus = "Zrzut ekranu nieudany (kod $errorCode)"
+                        onDone(false, lastStatus)
                     }
                 }
-
-                override fun onFailure(errorCode: Int) {
-                    lastStatus = "Zrzut ekranu nieudany (kod $errorCode)"
-                    onDone(false, lastStatus)
-                }
-            }
-        )
+            )
+        } catch (e: Throwable) {
+            lastStatus = "Nie udało się uruchomić zrzutu: ${e.javaClass.simpleName}"
+            onDone(false, lastStatus)
+        }
     }
 
     private fun saveBitmap(bitmap: Bitmap): Boolean {
-        val name = "elderbot_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png"
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, name)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ElderBot")
-        }
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
         return try {
-            contentResolver.openOutputStream(uri)?.use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
-            true
-        } catch (_: Exception) {
-            contentResolver.delete(uri, null, null)
+            val name = "elderbot_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png"
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ElderBot")
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: return false
+            try {
+                val stream = contentResolver.openOutputStream(uri) ?: return false
+                stream.use { out ->
+                    if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                        throw IllegalStateException("Nie udało się skompresować obrazu")
+                    }
+                }
+                true
+            } catch (e: Throwable) {
+                contentResolver.delete(uri, null, null)
+                false
+            }
+        } catch (_: Throwable) {
             false
         }
     }
