@@ -33,6 +33,13 @@ jobs:
       - name: Build debug APK
         run: gradle --no-daemon assembleDebug --stacktrace 2> build-error.log || (cat build-error.log; exit 1)
 
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: build-error.log
+        if-no-files-found: warn
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
