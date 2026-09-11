@@ -19,6 +19,9 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import android.widget.Button
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -193,34 +196,46 @@ class BotAccessibilityService : AccessibilityService() {
                                 buffer.close()
                             }
 
-                            val result = detectMetin(bitmap!!)
-                            val annotated = bitmap!!.copy(Bitmap.Config.ARGB_8888, true)
-                            if (result.found) {
-                                val canvas = Canvas(annotated)
-                                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                                    style = Paint.Style.STROKE
-                                    strokeWidth = 6f
-                                }
-                                canvas.drawRect(result.bounds, paint)
-                                paint.style = Paint.Style.FILL
-                                paint.textSize = 32f
-                                canvas.drawText("METIN?", result.bounds.left.toFloat(),
-                                    (result.bounds.top - 10).coerceAtLeast(35).toFloat(), paint)
-                            }
-                            saveBitmap(annotated)
-                            annotated.recycle()
+                            val captured = bitmap ?: throw IllegalStateException("Brak obrazu")
+                            detectMetinWithOcr(captured) { result ->
+                                try {
+                                    val annotated = captured.copy(Bitmap.Config.ARGB_8888, true)
+                                    if (result.found) {
+                                        val canvas = Canvas(annotated)
+                                        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                                            style = Paint.Style.STROKE
+                                            strokeWidth = 6f
+                                        }
+                                        canvas.drawRect(result.bounds, paint)
+                                        paint.style = Paint.Style.FILL
+                                        paint.textSize = 30f
+                                        canvas.drawText(
+                                            "METIN OCR",
+                                            result.bounds.left.toFloat(),
+                                            (result.bounds.top - 10).coerceAtLeast(35).toFloat(),
+                                            paint
+                                        )
+                                    }
+                                    saveBitmap(annotated)
+                                    annotated.recycle()
 
-                            lastStatus = if (result.found) {
-                                "Metin znaleziony: X=${result.centerX}, Y=${result.centerY}"
-                            } else {
-                                "Metina nie znaleziono"
+                                    lastStatus = if (result.found) {
+                                        "Metin znaleziony: X=${result.centerX}, Y=${result.centerY}"
+                                    } else {
+                                        "Metina nie znaleziono"
+                                    }
+                                    onDone(result.found, lastStatus)
+                                } catch (e: Throwable) {
+                                    lastStatus = "Błąd oznaczania wyniku: ${e.javaClass.simpleName}"
+                                    onDone(false, lastStatus)
+                                } finally {
+                                    captured.recycle()
+                                }
                             }
-                            onDone(result.found, lastStatus)
                         } catch (e: Throwable) {
-                            lastStatus = "Błąd wykrywania: ${e.javaClass.simpleName}"
-                            onDone(false, lastStatus)
-                        } finally {
                             bitmap?.recycle()
+                            lastStatus = "Błąd obsługi zrzutu: ${e.javaClass.simpleName}"
+                            onDone(false, lastStatus)
                         }
                     }
 
@@ -234,6 +249,91 @@ class BotAccessibilityService : AccessibilityService() {
             lastStatus = "Nie udało się uruchomić wykrywania: ${e.javaClass.simpleName}"
             onDone(false, lastStatus)
         }
+    }
+
+    private fun detectMetinWithOcr(bitmap: Bitmap, onResult: (MetinDetection) -> Unit) {
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        val image = InputImage.fromBitmap(bitmap, 0)
+
+        recognizer.process(image)
+            .addOnSuccessListener { text ->
+                val w = bitmap.width
+                val h = bitmap.height
+                val gameplay = Rect(
+                    (w * 0.10f).toInt(),
+                    (h * 0.08f).toInt(),
+                    (w * 0.90f).toInt(),
+                    (h * 0.82f).toInt()
+                )
+
+                var bestBox: Rect? = null
+                var bestScore = Int.MIN_VALUE
+
+                for (block in text.textBlocks) {
+                    for (line in block.lines) {
+                        val raw = line.text.trim()
+                        val normalized = raw.lowercase(Locale.getDefault())
+                            .replace("ę", "e").replace("ą", "a")
+                            .replace("ł", "l").replace("ś", "s")
+                            .replace("ć", "c").replace("ń", "n")
+                            .replace("ó", "o").replace("ź", "z").replace("ż", "z")
+                        val box = line.boundingBox ?: continue
+                        if (!normalized.startsWith("metin") || !box.intersect(gameplay)) continue
+
+                        val cx = (box.left + box.right) / 2
+                        val redScore = countRedPixelsNear(bitmap, box)
+                        val labelWidth = box.width().coerceAtLeast(1)
+                        val labelHeight = box.height().coerceAtLeast(1)
+                        val sizeScore = 100 - kotlin.math.abs(labelWidth - 90) - kotlin.math.abs(labelHeight - 18) * 2
+                        val score = redScore * 4 + sizeScore
+
+                        if (score > bestScore) {
+                            bestScore = score
+                            bestBox = Rect(box)
+                        }
+                    }
+                }
+
+                val label = bestBox
+                if (label == null) {
+                    recognizer.close()
+                    onResult(MetinDetection(false, Rect(), 0, 0))
+                    return@addOnSuccessListener
+                }
+
+                // The label is above the stone. Use a generous, colour-independent target area
+                // below the text so different Metin auras do not affect detection.
+                val left = (label.centerX() - 65).coerceAtLeast(gameplay.left)
+                val right = (label.centerX() + 65).coerceAtMost(gameplay.right)
+                val top = (label.bottom + 5).coerceAtMost(gameplay.bottom - 20)
+                val bottom = (label.bottom + 125).coerceAtMost(gameplay.bottom)
+                val target = Rect(left, top, right, bottom)
+
+                recognizer.close()
+                onResult(MetinDetection(true, target, target.centerX(), target.centerY()))
+            }
+            .addOnFailureListener {
+                recognizer.close()
+                onResult(MetinDetection(false, Rect(), 0, 0))
+            }
+    }
+
+    private fun countRedPixelsNear(bitmap: Bitmap, box: Rect): Int {
+        val left = (box.left - 20).coerceAtLeast(0)
+        val right = (box.right + 20).coerceAtMost(bitmap.width)
+        val top = (box.top - 8).coerceAtLeast(0)
+        val bottom = (box.bottom + 8).coerceAtMost(bitmap.height)
+        var count = 0
+        for (y in top until bottom step 2) {
+            for (x in left until right step 2) {
+                val c = bitmap.getPixel(x, y)
+                val r = android.graphics.Color.red(c)
+                val g = android.graphics.Color.green(c)
+                val b = android.graphics.Color.blue(c)
+                if (r >= 90 && r > g * 1.25f && r > b * 1.20f) count++
+            }
+        }
+        return count
     }
 
     private data class MetinDetection(

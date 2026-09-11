@@ -28,3 +28,7 @@ Poprawka V1.1: usługa dostępności ma jawnie włączoną możliwość wykonywa
 
 ## V1.4 — wizualne wykrywanie Metina
 Dodano pierwszy test detekcji obrazu: skan pola gry pod kątem charakterystycznej żółtej poświaty oraz czerwonej nazwy Metina. Wynik pokazuje pozycję kandydata na ekranie i zapisuje oznaczony zrzut w Pictures/ElderBot. Wersja nie steruje postacią i nie atakuje.
+
+
+## V2 detector
+Detector V2 uses on-device ML Kit Latin OCR to find labels beginning with `Metin`, then estimates the stone position below the label. It is a screen-analysis feature and does not modify game files.

@@ -23,14 +23,14 @@ class MainActivity : Activity() {
         }
 
         val title = TextView(this).apply {
-            text = "ElderBot V1"
+            text = "ElderBot V2"
             textSize = 28f
             gravity = Gravity.CENTER
             setPadding(16, 32, 16, 12)
         }
 
         val info = TextView(this).apply {
-            text = "Wersja testowa: zrzut ekranu + pierwsze wizualne wykrywanie Metina.\n\nNa tym etapie bot tylko analizuje obraz i pokazuje, czy znalazł kandydata na Metina. Nie porusza postacią i nie atakuje."
+            text = "V2: wykrywanie Metina na podstawie nazwy widocznej na ekranie (OCR) + położenia obiektu.\n\nNa tym etapie bot tylko analizuje obraz. Nie porusza postacią i nie atakuje."
             textSize = 15f
             setTextColor(Color.DKGRAY)
             setPadding(24, 8, 24, 24)
@@ -54,7 +54,7 @@ class MainActivity : Activity() {
         }
 
         val detect = Button(this).apply {
-            text = "3. TEST WYKRYWANIA METINA"
+            text = "3. TEST V2 — WYKRYJ METINA"
             setOnClickListener {
                 val service = BotAccessibilityService.instance
                 if (service == null) {
