@@ -506,6 +506,27 @@ class BotAccessibilityService : AccessibilityService() {
         lastStatus = "Wysłano testowy dotyk: środek ekranu"
     }
 
+    fun testMoveJoystickRight() {
+        if (running) return
+        val metrics = resources.displayMetrics
+        val w = metrics.widthPixels.toFloat()
+        val h = metrics.heightPixels.toFloat()
+        val startX = w * 0.13f
+        val startY = h * 0.77f
+        val endX = startX + w * 0.055f
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, startY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 700)
+        dispatchGesture(
+            GestureDescription.Builder().addStroke(stroke).build(),
+            null,
+            null
+        )
+        lastStatus = "Wysłano test ruchu joystickiem w prawo"
+    }
+
     fun startBot() {
         running = true
         lastStatus = "Tryb pracy włączony — logika farmienia jeszcze nieaktywna"
