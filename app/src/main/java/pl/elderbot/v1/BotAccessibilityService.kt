@@ -278,7 +278,7 @@ class BotAccessibilityService : AccessibilityService() {
                             .replace("ć", "c").replace("ń", "n")
                             .replace("ó", "o").replace("ź", "z").replace("ż", "z")
                         val box = line.boundingBox ?: continue
-                        if (!normalized.startsWith("metin") || !box.intersect(gameplay)) continue
+                        if (!normalized.contains("metin") || !box.intersect(gameplay)) continue
 
                         val cx = (box.left + box.right) / 2
                         val redScore = countRedPixelsNear(bitmap, box)
