@@ -24,3 +24,7 @@ Projekt nie modyfikuje plików gry ani nie zawiera mechanizmów obchodzenia zabe
 
 
 Poprawka V1.1: usługa dostępności ma jawnie włączoną możliwość wykonywania zrzutów ekranu (`canTakeScreenshot`), wymaganą przez Android AccessibilityService.
+
+
+## V1.4 — wizualne wykrywanie Metina
+Dodano pierwszy test detekcji obrazu: skan pola gry pod kątem charakterystycznej żółtej poświaty oraz czerwonej nazwy Metina. Wynik pokazuje pozycję kandydata na ekranie i zapisuje oznaczony zrzut w Pictures/ElderBot. Wersja nie steruje postacią i nie atakuje.

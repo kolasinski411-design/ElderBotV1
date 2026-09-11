@@ -30,7 +30,7 @@ class MainActivity : Activity() {
         }
 
         val info = TextView(this).apply {
-            text = "Wersja przygotowawcza: sterowanie ekranem + zrzut ekranu.\n\nNajpierw sprawdzamy komunikację z grą. Wykrywanie Metinów i trasa farmienia dojdą po zebraniu obrazu referencyjnego Metina."
+            text = "Wersja testowa: zrzut ekranu + pierwsze wizualne wykrywanie Metina.\n\nNa tym etapie bot tylko analizuje obraz i pokazuje, czy znalazł kandydata na Metina. Nie porusza postacią i nie atakuje."
             textSize = 15f
             setTextColor(Color.DKGRAY)
             setPadding(24, 8, 24, 24)
@@ -49,6 +49,18 @@ class MainActivity : Activity() {
                     status.text = "Najpierw włącz usługę dostępności."
                 } else {
                     service.captureAndSaveScreenshot { _, message -> status.text = message }
+                }
+            }
+        }
+
+        val detect = Button(this).apply {
+            text = "3. TEST WYKRYWANIA METINA"
+            setOnClickListener {
+                val service = BotAccessibilityService.instance
+                if (service == null) {
+                    status.text = "Najpierw włącz usługę dostępności."
+                } else {
+                    service.captureAndDetectMetin { _, message -> status.text = message }
                 }
             }
         }
@@ -75,6 +87,7 @@ class MainActivity : Activity() {
             addView(info)
             addView(openSettings)
             addView(screenshot)
+            addView(detect)
             addView(tapTest)
             addView(start)
             addView(stop)

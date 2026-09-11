@@ -3,6 +3,9 @@ package pl.elderbot.v1
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.ColorSpace
 import android.graphics.Path
 import android.hardware.HardwareBuffer
@@ -56,13 +59,13 @@ class BotAccessibilityService : AccessibilityService() {
         if (overlayButton != null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
 
         val button = Button(this).apply {
-            text = "📸 ZRZUT GRY"
+            text = "🔎 METIN"
             textSize = 12f
             setPadding(10, 0, 10, 0)
             setOnClickListener {
                 visibility = View.INVISIBLE
                 mainHandler.postDelayed({
-                    captureAndSaveScreenshot { _, _ ->
+                    captureAndDetectMetin { _, _ ->
                         visibility = View.VISIBLE
                     }
                 }, 200L)
@@ -156,6 +159,211 @@ class BotAccessibilityService : AccessibilityService() {
         } catch (e: Throwable) {
             lastStatus = "Nie udało się uruchomić zrzutu: ${e.javaClass.simpleName}"
             onDone(false, lastStatus)
+        }
+    }
+
+    /**
+     * Captures the game screen and performs a conservative visual Metin candidate scan.
+     * It looks for a yellow/amber glow in the gameplay area and a nearby red name label.
+     * This is only visual screen analysis; it does not inspect or modify game files.
+     */
+    fun captureAndDetectMetin(onDone: (Boolean, String) -> Unit = { _, _ -> }) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            lastStatus = "Wykrywanie wymaga Androida 11+"
+            onDone(false, lastStatus)
+            return
+        }
+
+        val displayId = android.view.Display.DEFAULT_DISPLAY
+        try {
+            takeScreenshot(
+                displayId,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        var bitmap: Bitmap? = null
+                        try {
+                            val buffer: HardwareBuffer = screenshot.hardwareBuffer
+                            try {
+                                val hardwareBitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                                    ?: throw IllegalStateException("Bitmap jest pusty")
+                                bitmap = hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                                hardwareBitmap.recycle()
+                            } finally {
+                                buffer.close()
+                            }
+
+                            val result = detectMetin(bitmap!!)
+                            val annotated = bitmap!!.copy(Bitmap.Config.ARGB_8888, true)
+                            if (result.found) {
+                                val canvas = Canvas(annotated)
+                                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                                    style = Paint.Style.STROKE
+                                    strokeWidth = 6f
+                                }
+                                canvas.drawRect(result.bounds, paint)
+                                paint.style = Paint.Style.FILL
+                                paint.textSize = 32f
+                                canvas.drawText("METIN?", result.bounds.left.toFloat(),
+                                    (result.bounds.top - 10).coerceAtLeast(35).toFloat(), paint)
+                            }
+                            saveBitmap(annotated)
+                            annotated.recycle()
+
+                            lastStatus = if (result.found) {
+                                "Metin znaleziony: X=${result.centerX}, Y=${result.centerY}"
+                            } else {
+                                "Metina nie znaleziono"
+                            }
+                            onDone(result.found, lastStatus)
+                        } catch (e: Throwable) {
+                            lastStatus = "Błąd wykrywania: ${e.javaClass.simpleName}"
+                            onDone(false, lastStatus)
+                        } finally {
+                            bitmap?.recycle()
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        lastStatus = "Zrzut ekranu nieudany (kod $errorCode)"
+                        onDone(false, lastStatus)
+                    }
+                }
+            )
+        } catch (e: Throwable) {
+            lastStatus = "Nie udało się uruchomić wykrywania: ${e.javaClass.simpleName}"
+            onDone(false, lastStatus)
+        }
+    }
+
+    private data class MetinDetection(
+        val found: Boolean,
+        val bounds: Rect,
+        val centerX: Int,
+        val centerY: Int
+    )
+
+    private fun detectMetin(bitmap: Bitmap): MetinDetection {
+        val w = bitmap.width
+        val h = bitmap.height
+
+        // HUD/minimap/chat are deliberately excluded. We analyse the gameplay field only.
+        val left = (w * 0.18f).toInt()
+        val right = (w * 0.82f).toInt()
+        val top = (h * 0.12f).toInt()
+        val bottom = (h * 0.88f).toInt()
+        val step = 3
+        val cols = ((right - left) + step - 1) / step
+        val rows = ((bottom - top) + step - 1) / step
+        val visited = BooleanArray(cols * rows)
+        val hsv = FloatArray(3)
+        val blobs = mutableListOf<Rect>()
+
+        fun isYellowGlow(x: Int, y: Int): Boolean {
+            android.graphics.Color.RGBToHSV(
+                android.graphics.Color.red(bitmap.getPixel(x, y)),
+                android.graphics.Color.green(bitmap.getPixel(x, y)),
+                android.graphics.Color.blue(bitmap.getPixel(x, y)),
+                hsv
+            )
+            val hue = hsv[0]
+            val sat = hsv[1]
+            val value = hsv[2]
+            return hue in 12f..48f && sat >= 0.32f && value >= 0.30f
+        }
+
+        fun gridIndex(gx: Int, gy: Int) = gy * cols + gx
+
+        for (gy in 0 until rows) {
+            for (gx in 0 until cols) {
+                val gi = gridIndex(gx, gy)
+                if (visited[gi]) continue
+                val px = (left + gx * step).coerceAtMost(right - 1)
+                val py = (top + gy * step).coerceAtMost(bottom - 1)
+                if (!isYellowGlow(px, py)) continue
+
+                val queue = ArrayDeque<Int>()
+                queue.add(gi)
+                visited[gi] = true
+                var minGX = gx; var maxGX = gx
+                var minGY = gy; var maxGY = gy
+                var count = 0
+
+                while (queue.isNotEmpty()) {
+                    val cur = queue.removeFirst()
+                    val cx = cur % cols
+                    val cy = cur / cols
+                    count++
+                    minGX = minOf(minGX, cx); maxGX = maxOf(maxGX, cx)
+                    minGY = minOf(minGY, cy); maxGY = maxOf(maxGY, cy)
+
+                    for (dy in -1..1) {
+                        for (dx in -1..1) {
+                            if (dx == 0 && dy == 0) continue
+                            val nx = cx + dx; val ny = cy + dy
+                            if (nx !in 0 until cols || ny !in 0 until rows) continue
+                            val ni = gridIndex(nx, ny)
+                            if (visited[ni]) continue
+                            val qx = (left + nx * step).coerceAtMost(right - 1)
+                            val qy = (top + ny * step).coerceAtMost(bottom - 1)
+                            if (isYellowGlow(qx, qy)) {
+                                visited[ni] = true
+                                queue.add(ni)
+                            }
+                        }
+                    }
+                }
+
+                val bw = (maxGX - minGX + 1) * step
+                val bh = (maxGY - minGY + 1) * step
+                if (count >= 8 && bw in 18..240 && bh in 18..240) {
+                    blobs.add(
+                        Rect(
+                            left + minGX * step - 18,
+                            top + minGY * step - 18,
+                            (left + (maxGX + 1) * step + 18).coerceAtMost(right),
+                            (top + (maxGY + 1) * step + 18).coerceAtMost(bottom)
+                        )
+                    )
+                }
+            }
+        }
+
+        // A Metin in the supplied screenshots has a red name above the stone.
+        // Give candidates with nearby red text a strong preference.
+        var best: Rect? = null
+        var bestScore = Int.MIN_VALUE
+        for (rect in blobs) {
+            val cx = (rect.left + rect.right) / 2
+            val redBoxLeft = (cx - 130).coerceAtLeast(left)
+            val redBoxRight = (cx + 130).coerceAtMost(right - 1)
+            val redBoxTop = (rect.top - 90).coerceAtLeast(top)
+            val redBoxBottom = (rect.top + 20).coerceAtMost(bottom - 1)
+            var redPixels = 0
+            for (y in redBoxTop until redBoxBottom step 3) {
+                for (x in redBoxLeft until redBoxRight step 3) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = android.graphics.Color.red(c)
+                    val g = android.graphics.Color.green(c)
+                    val b = android.graphics.Color.blue(c)
+                    if (r >= 105 && r > g * 1.40f && r > b * 1.30f && g < 115) redPixels++
+                }
+            }
+            val area = rect.width() * rect.height()
+            val sizePenalty = kotlin.math.abs(rect.width() - 100) + kotlin.math.abs(rect.height() - 100)
+            val score = redPixels * 20 + (10000 - sizePenalty).coerceAtLeast(0) / 20 - area / 1000
+            if (score > bestScore) {
+                bestScore = score
+                best = rect
+            }
+        }
+
+        val chosen = best ?: return MetinDetection(false, Rect(), 0, 0)
+        val found = bestScore >= 80
+        return if (found) {
+            MetinDetection(true, chosen, (chosen.left + chosen.right) / 2, (chosen.top + chosen.bottom) / 2)
+        } else {
+            MetinDetection(false, Rect(), 0, 0)
         }
     }
 
