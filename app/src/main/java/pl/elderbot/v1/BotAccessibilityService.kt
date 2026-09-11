@@ -13,6 +13,10 @@ import android.provider.MediaStore
 import android.content.ContentValues
 import android.os.Environment
 import android.view.accessibility.AccessibilityEvent
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -24,6 +28,8 @@ class BotAccessibilityService : AccessibilityService() {
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var overlayButton: Button? = null
+    private var windowManager: WindowManager? = null
     @Volatile private var running = false
     @Volatile private var lastStatus = "Usługa gotowa"
 
@@ -31,6 +37,7 @@ class BotAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         lastStatus = "Usługa dostępności aktywna"
+        showScreenshotOverlay()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -40,6 +47,60 @@ class BotAccessibilityService : AccessibilityService() {
     }
 
     fun status(): String = lastStatus
+
+    /**
+     * Adds a small accessibility overlay button so a screenshot can be taken while the game is in front.
+     * The overlay is hidden briefly before capture so it does not appear in the saved game screenshot.
+     */
+    private fun showScreenshotOverlay() {
+        if (overlayButton != null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+
+        val button = Button(this).apply {
+            text = "📸 ZRZUT GRY"
+            textSize = 12f
+            setPadding(10, 0, 10, 0)
+            setOnClickListener {
+                visibility = View.INVISIBLE
+                mainHandler.postDelayed({
+                    captureAndSaveScreenshot { _, _ ->
+                        visibility = View.VISIBLE
+                    }
+                }, 200L)
+            }
+        }
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            android.graphics.PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 12
+            y = 120
+        }
+
+        try {
+            windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+            windowManager?.addView(button, params)
+            overlayButton = button
+        } catch (_: Throwable) {
+            overlayButton = null
+            windowManager = null
+        }
+    }
+
+    private fun removeScreenshotOverlay() {
+        val button = overlayButton ?: return
+        try {
+            windowManager?.removeView(button)
+        } catch (_: Throwable) {
+        }
+        overlayButton = null
+        windowManager = null
+    }
 
     /**
      * Captures the current screen using the Android Accessibility screenshot API.
@@ -148,6 +209,7 @@ class BotAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        removeScreenshotOverlay()
         instance = null
         running = false
         mainHandler.removeCallbacksAndMessages(null)
