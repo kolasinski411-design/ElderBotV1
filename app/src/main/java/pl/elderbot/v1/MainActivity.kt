@@ -70,6 +70,14 @@ class MainActivity : Activity() {
             setOnClickListener { BotAccessibilityService.instance?.tapScreenCentre() ?: run { status.text = "Najpierw włącz usługę dostępności." } }
         }
 
+        val moveTest = Button(this).apply {
+            text = "4. TEST RUCHU →"
+            setOnClickListener {
+                BotAccessibilityService.instance?.testMoveJoystickRight()
+                    ?: run { status.text = "Najpierw włącz usługę dostępności." }
+            }
+        }
+
         val start = Button(this).apply {
             text = "START"
             setOnClickListener { BotAccessibilityService.instance?.startBot() ?: run { status.text = "Najpierw włącz usługę dostępności." } }
