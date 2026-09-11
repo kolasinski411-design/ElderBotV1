@@ -21,3 +21,6 @@ Te elementy wymagają najpierw obrazu referencyjnego Metina z ElderMT2 i testów
 Projekt zawiera workflow GitHub Actions w `.github/workflows/build.yml`. Po uruchomieniu workflow wynikowy `app-debug.apk` zostanie udostępniony jako artefakt.
 
 Projekt nie modyfikuje plików gry ani nie zawiera mechanizmów obchodzenia zabezpieczeń serwera.
+
+
+Poprawka V1.1: usługa dostępności ma jawnie włączoną możliwość wykonywania zrzutów ekranu (`canTakeScreenshot`), wymaganą przez Android AccessibilityService.

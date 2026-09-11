@@ -3,10 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 android {
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
-    }
     namespace = "pl.elderbot.v1"
     compileSdk = 35
     defaultConfig {

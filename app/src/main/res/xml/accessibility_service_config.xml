@@ -4,5 +4,6 @@
     android:accessibilityEventTypes="typeAllMask"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canRetrieveWindowContent="false"
+    android:canTakeScreenshot="true"
     android:notificationTimeout="100"
     android:canPerformGestures="true" />
