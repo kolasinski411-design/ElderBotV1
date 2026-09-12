@@ -222,6 +222,7 @@ class BotAccessibilityService : AccessibilityService() {
 
                             val captured = bitmap ?: throw IllegalStateException("Brak obrazu")
                             detectMetinWithOcr(captured) { result ->
+                            if (result.found) updateDetectedPosition(result.centerX, result.centerY)
                                 try {
                                     val annotated = captured.copy(Bitmap.Config.ARGB_8888, true)
                                     if (result.found) {
@@ -530,38 +531,138 @@ class BotAccessibilityService : AccessibilityService() {
         lastStatus = "Wysłano testowy dotyk: środek ekranu"
     }
 
-    fun testMoveJoystickLeft() {
-        if (running) return
-        val metrics = resources.displayMetrics
-        val w = metrics.widthPixels.toFloat()
-        val h = metrics.heightPixels.toFloat()
-        val startX = w * 0.13f
-        val startY = h * 0.77f
-        val endX = startX + w * 0.055f
-        val path = Path().apply {
-            moveTo(startX, startY)
-            lineTo(endX, startY)
+    
+private fun moveJoystick(dx: Float, dy: Float, duration: Long = 500L) {
+    val metrics = resources.displayMetrics
+    val w = metrics.widthPixels.toFloat()
+    val h = metrics.heightPixels.toFloat()
+
+    val startX = w * 0.13f
+    val startY = h * 0.77f
+    val endX = startX + dx * w * 0.055f
+    val endY = startY + dy * h * 0.055f
+
+    val path = Path().apply {
+        moveTo(startX, startY)
+        lineTo(endX, endY)
+    }
+
+    val stroke = GestureDescription.StrokeDescription(path, 0, duration)
+
+    dispatchGesture(
+        GestureDescription.Builder().addStroke(stroke).build(),
+        null,
+        null
+    )
+}
+
+fun testMoveJoystickLeft() {
+    if (running) return
+    moveJoystick(-1f, 0f)
+    lastStatus = "Test ruchu: LEWO"
+}
+
+fun testMoveJoystickRight() {
+    if (running) return
+    moveJoystick(1f, 0f)
+    lastStatus = "Test ruchu: PRAWO"
+}
+
+private fun tapAttackButton() {
+    val metrics = resources.displayMetrics
+    val w = metrics.widthPixels.toFloat()
+    val h = metrics.heightPixels.toFloat()
+
+    val x = w * 0.89f
+    val y = h * 0.76f
+
+    val path = Path().apply {
+        moveTo(x, y)
+    }
+
+    val stroke = GestureDescription.StrokeDescription(path, 0, 80)
+
+    dispatchGesture(
+        GestureDescription.Builder().addStroke(stroke).build(),
+        null,
+        null
+    )
+}
+
+private fun farmTick() {
+    if (!running) return
+
+    captureAndDetectMetin { found, _ ->
+        if (!running) return@captureAndDetectMetin
+
+        if (!found) {
+            lastStatus = "Szukam Metina..."
+        } else {
+            val metrics = resources.displayMetrics
+            val w = metrics.widthPixels
+            val h = metrics.heightPixels
+
+            val centerX = w / 2
+            val centerY = (h * 0.50f).toInt()
+
+            val dx = lastDetectedX - centerX
+            val dy = lastDetectedY - centerY
+
+            val toleranceX = (w * 0.10f).toInt()
+            val toleranceY = (h * 0.10f).toInt()
+
+            if (kotlin.math.abs(dx) <= toleranceX &&
+                kotlin.math.abs(dy) <= toleranceY) {
+
+                lastStatus = "Metin na celu — ATAK"
+                tapAttackButton()
+            } else {
+                val dirX = when {
+                    dx > toleranceX -> 1f
+                    dx < -toleranceX -> -1f
+                    else -> 0f
+                }
+
+                val dirY = when {
+                    dy > toleranceY -> 1f
+                    dy < -toleranceY -> -1f
+                    else -> 0f
+                }
+
+                moveJoystick(dirX, dirY, 450L)
+                lastStatus = "Podejście do Metina: X=$dx Y=$dy"
+            }
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0, 700)
-        dispatchGesture(
-            GestureDescription.Builder().addStroke(stroke).build(),
-            null,
-            null
-        )
-        lastStatus = "Wysłano test ruchu joystickiem w prawo"
-    }
 
-    fun startBot() {
-        running = true
-        lastStatus = "Tryb pracy włączony — logika farmienia jeszcze nieaktywna"
+        mainHandler.postDelayed({
+            farmTick()
+        }, 650L)
     }
+}
 
-    fun stopBot() {
-        running = false
-        lastStatus = "Bot zatrzymany"
-    }
+private var lastDetectedX: Int = 0
+private var lastDetectedY: Int = 0
 
-    override fun onDestroy() {
+private fun updateDetectedPosition(x: Int, y: Int) {
+    lastDetectedX = x
+    lastDetectedY = y
+}
+
+fun startBot() {
+    if (running) return
+
+    running = true
+    lastStatus = "ElderBot: SZUKAM METINA..."
+    farmTick()
+}
+
+fun stopBot() {
+    running = false
+    mainHandler.removeCallbacksAndMessages(null)
+    lastStatus = "Bot zatrzymany"
+}
+
+override fun onDestroy() {
         removeScreenshotOverlay()
         instance = null
         running = false
