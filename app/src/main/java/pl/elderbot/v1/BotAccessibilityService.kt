@@ -44,7 +44,7 @@ class BotAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         lastStatus = "Usługa dostępności aktywna"
-        showScreenshotOverlay()
+        // showScreenshotOverlay() // wyłączone - bot działa bez nakładki
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
