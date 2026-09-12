@@ -44,7 +44,7 @@ class BotAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         lastStatus = "Usługa dostępności aktywna"
-        // showScreenshotOverlay() // wyłączone - bot działa bez nakładki
+        showScreenshotOverlay()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -60,65 +60,89 @@ class BotAccessibilityService : AccessibilityService() {
      * The overlay is hidden briefly before capture so it does not appear in the saved game screenshot.
      */
     private fun showScreenshotOverlay() {
-        if (overlayButton != null || Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+        if (overlayButton != null) return
+
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val button = Button(this).apply {
-            text = "🔎 METIN"
-            textSize = 12f
-            setPadding(10, 0, 10, 0)
-            setOnClickListener {
-                visibility = View.INVISIBLE
-                mainHandler.postDelayed({
-                    captureAndDetectMetin { _, _ ->
-                        visibility = View.VISIBLE
-                    }
-                }, 200L)
-            }
+            text = "▶"
+            textSize = 18f
+            alpha = 0.72f
+            setPadding(0, 0, 0, 0)
         }
 
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            105,
+            105,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
+            else
+                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             android.graphics.PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
             x = 12
-            y = 120
+            y = 210
+        }
+
+        var startX = 0
+        var startY = 0
+        var touchX = 0f
+        var touchY = 0f
+        var moved = false
+
+        button.setOnTouchListener { v, event ->
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    startX = params.x
+                    startY = params.y
+                    touchX = event.rawX
+                    touchY = event.rawY
+                    moved = false
+                    true
+                }
+
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    val dx = (touchX - event.rawX).toInt()
+                    val dy = (event.rawY - touchY).toInt()
+
+                    if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) {
+                        moved = true
+                    }
+
+                    params.x = (startX + dx).coerceAtLeast(0)
+                    params.y = (startY + dy).coerceAtLeast(0)
+
+                    try {
+                        windowManager?.updateViewLayout(button, params)
+                    } catch (_: Throwable) {
+                    }
+                    true
+                }
+
+                android.view.MotionEvent.ACTION_UP -> {
+                    if (!moved) {
+                        if (running) {
+                            stopBot()
+                            button.text = "▶"
+                        } else {
+                            startBot()
+                            button.text = "■"
+                        }
+                    }
+                    true
+                }
+
+                else -> false
+            }
         }
 
         try {
-            windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
             windowManager?.addView(button, params)
             overlayButton = button
-        val moveButton = Button(this).apply {
-            text = "⬅️ LEWO / ➡️ PRAWO"
-            textSize = 12f
-            setPadding(10, 0, 10, 0)
-            setOnClickListener { testMoveJoystickRight() }
-        }
-        val moveParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-            android.graphics.PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = 150
-            y = 120
-        }
-        try {
-            windowManager?.addView(moveButton, moveParams)
-            moveOverlayButton = moveButton
-        } catch (_: Throwable) {
-            moveOverlayButton = null
-        }
         } catch (_: Throwable) {
             overlayButton = null
-            windowManager = null
         }
     }
 
