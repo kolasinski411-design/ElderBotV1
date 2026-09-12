@@ -1,34 +1,17 @@
-# ElderBot V1 — przygotowanie Android
+# ElderBot V0.9 FARM LOOP
 
-To jest wersja przygotowawcza aplikacji dla Androida.
+Android Accessibility + on-screen OCR prototype for ElderMT2.
 
-## Co działa w tej wersji
-- usługa Accessibility,
-- wykonywanie zrzutu aktualnego ekranu przez API Androida,
-- zapis zrzutu do `Pictures/ElderBot`,
-- bezpieczny test pojedynczego dotyku na środku ekranu,
-- przyciski START/STOP jako podstawa przyszłej pętli bota.
+Core loop in this build:
+- search visually for Metin labels,
+- continuous smoothed joystick steering,
+- detect lack of progress and attempt left/right obstacle bypass,
+- reacquire the Metin after the bypass,
+- select and repeatedly attack the Metin,
+- detect disappearance, then OCR/tap nearby loot labels,
+- return to searching for the next Metin.
 
-## Czego jeszcze nie ma
-- automatycznego wykrywania Metinów,
-- wyboru celu,
-- nawigacji po mapie,
-- automatycznego farmienia i zbierania.
-
-Te elementy wymagają najpierw obrazu referencyjnego Metina z ElderMT2 i testów na rzeczywistym ekranie gry.
-
-## Budowanie APK
-Projekt zawiera workflow GitHub Actions w `.github/workflows/build.yml`. Po uruchomieniu workflow wynikowy `app-debug.apk` zostanie udostępniony jako artefakt.
-
-Projekt nie modyfikuje plików gry ani nie zawiera mechanizmów obchodzenia zabezpieczeń serwera.
-
-
-Poprawka V1.1: usługa dostępności ma jawnie włączoną możliwość wykonywania zrzutów ekranu (`canTakeScreenshot`), wymaganą przez Android AccessibilityService.
-
-
-## V1.4 — wizualne wykrywanie Metina
-Dodano pierwszy test detekcji obrazu: skan pola gry pod kątem charakterystycznej żółtej poświaty oraz czerwonej nazwy Metina. Wynik pokazuje pozycję kandydata na ekranie i zapisuje oznaczony zrzut w Pictures/ElderBot. Wersja nie steruje postacią i nie atakuje.
-
-
-## V2 detector
-Detector V2 uses on-device ML Kit Latin OCR to find labels beginning with `Metin`, then estimates the stone position below the label. It is a screen-analysis feature and does not modify game files.
+Notes:
+- Obstacle avoidance is reactive. It does not read game map/navigation data.
+- Exact attack/pickup button coordinates remain screen-layout dependent.
+- No anti-cheat bypass, injection, wallhack, or game-file modification is used.
