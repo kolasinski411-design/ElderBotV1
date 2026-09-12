@@ -10,3 +10,9 @@ Zmiany:
 - zachowane Pickup przez ikonę ręki, Auto Skills, Auto Potions, Auto Revive i Safe Approach.
 
 Sterowanie wyłącznie przez ekran/OCR/Accessibility.
+
+
+## V0.19.1 BUILD FIX
+- poprawiony blad kompilacji ScrollView/LayoutParams w panelu overlay,
+- zachowane START/STOP u gory i przewijanie ustawien,
+- zachowane Multi Target, Pickup, Auto Skills, Auto Potions i Auto Revive.
