@@ -23,6 +23,11 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
+import android.widget.Switch
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -35,6 +40,10 @@ class BotAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayButton: Button? = null
+    private var overlayPanel: LinearLayout? = null
+    private var overlayStatus: TextView? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
+    private var panelVisible = false
     private var windowManager: WindowManager? = null
     @Volatile private var running = false
     @Volatile private var lastStatus = "Usługa gotowa"
@@ -62,6 +71,16 @@ class BotAccessibilityService : AccessibilityService() {
     private var avoidPhaseTicks = 0
     private var avoidDirection = 1f
     private var avoidAttempts = 0
+    private var bestApproachError = Float.MAX_VALUE
+    private var lastMeaningfulProgressAt = 0L
+    private val skillLastTapAt = LongArray(3)
+    private var lastHpPotionAt = 0L
+    private var lastMpPotionAt = 0L
+    private var lastReviveScanAt = 0L
+
+    private fun prefs() = getSharedPreferences("elderbot_settings", MODE_PRIVATE)
+    private fun enabled(key: String, defaultValue: Boolean = true): Boolean =
+        prefs().getBoolean(key, defaultValue)
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -82,51 +101,213 @@ class BotAccessibilityService : AccessibilityService() {
      * Adds a small accessibility overlay button so a screenshot can be taken while the game is in front.
      * The overlay is hidden briefly before capture so it does not appear in the saved game screenshot.
      */
+    private fun overlayBg(color: Int, stroke: Int = Color.rgb(70, 82, 110)): GradientDrawable =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = 18f
+            setStroke(2, stroke)
+        }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    /**
+     * Compact in-game control inspired by desktop bot panels.  It is an
+     * accessibility overlay, so it remains available while ElderMT2 is open.
+     * It does not modify or inject into the game client.
+     */
     private fun showScreenshotOverlay() {
         if (overlayButton != null) return
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
         val button = Button(this).apply {
-            text = "▶"
-            textSize = 18f
-            alpha = 0.72f
+            text = "EB"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            alpha = 0.90f
+            background = overlayBg(Color.rgb(24, 28, 38), Color.rgb(90, 125, 220))
             setPadding(0, 0, 0, 0)
         }
         val params = WindowManager.LayoutParams(
-            105, 105,
+            dp(52), dp(52),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             android.graphics.PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.END; x = 12; y = 210 }
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = dp(8)
+            y = dp(150)
+        }
+        overlayParams = params
+
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(dp(10), dp(8), dp(10), dp(10))
+            background = overlayBg(Color.argb(242, 18, 21, 28), Color.rgb(72, 88, 130))
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val title = TextView(this).apply {
+            text = "ELDERBOT MOBILE"
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            setPadding(dp(4), dp(4), dp(8), dp(6))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val minimize = Button(this).apply {
+            text = "—"
+            textSize = 16f
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+            setPadding(dp(8), 0, dp(8), 0)
+            setOnClickListener { setPanelVisible(false) }
+        }
+        header.addView(title)
+        header.addView(minimize, LinearLayout.LayoutParams(dp(46), dp(38)))
+        panel.addView(header)
+
+        val stat = TextView(this).apply {
+            text = lastStatus
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            setPadding(dp(5), dp(2), dp(5), dp(8))
+        }
+        overlayStatus = stat
+        panel.addView(stat)
+
+        fun addToggle(label: String, key: String) {
+            val sw = Switch(this).apply {
+                text = label
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                isChecked = enabled(key)
+                setPadding(dp(4), 0, dp(4), 0)
+                setOnCheckedChangeListener { _, checked ->
+                    prefs().edit().putBoolean(key, checked).apply()
+                }
+            }
+            panel.addView(sw, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
+        }
+
+        addToggle("Farmbot", "farmbot")
+        addToggle("Pickup", "pickup")
+        addToggle("Auto Skills", "auto_skills")
+        addToggle("Auto Potions", "auto_potions")
+        addToggle("Auto Revive", "auto_revive")
+
+        val targetInfo = TextView(this).apply {
+            text = "CEL: METINY   •   NAV: ANTI-STUCK"
+            textSize = 11f
+            setTextColor(Color.rgb(150, 178, 255))
+            setPadding(dp(5), dp(6), dp(5), dp(6))
+        }
+        panel.addView(targetInfo)
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        val start = Button(this).apply {
+            text = "START"
+            textSize = 12f
+            setOnClickListener { startBot(); refreshOverlay() }
+        }
+        val stop = Button(this).apply {
+            text = "STOP"
+            textSize = 12f
+            setOnClickListener { stopBot(); refreshOverlay() }
+        }
+        controls.addView(start, LinearLayout.LayoutParams(0, dp(44), 1f))
+        controls.addView(stop, LinearLayout.LayoutParams(0, dp(44), 1f))
+        panel.addView(controls)
+
+        val future = TextView(this).apply {
+            text = "⛏ Mining   •   🎣 Fishing  [kolejny etap]"
+            textSize = 11f
+            setTextColor(Color.GRAY)
+            gravity = Gravity.CENTER
+            setPadding(dp(2), dp(8), dp(2), dp(2))
+        }
+        panel.addView(future)
+
+        val panelParams = WindowManager.LayoutParams(
+            dp(292), WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            android.graphics.PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = dp(8)
+            y = dp(150)
+        }
+
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f; var moved = false
         button.setOnTouchListener { _, event ->
             when (event.action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
-                    startX=params.x; startY=params.y; touchX=event.rawX; touchY=event.rawY; moved=false; true
+                    startX = params.x; startY = params.y; touchX = event.rawX; touchY = event.rawY; moved = false; true
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
-                    val dx=(touchX-event.rawX).toInt(); val dy=(event.rawY-touchY).toInt()
-                    if (kotlin.math.abs(dx)>8 || kotlin.math.abs(dy)>8) moved=true
-                    params.x=(startX+dx).coerceAtLeast(0); params.y=(startY+dy).coerceAtLeast(0)
+                    val dx = (touchX - event.rawX).toInt()
+                    val dy = (event.rawY - touchY).toInt()
+                    if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) moved = true
+                    params.x = (startX + dx).coerceAtLeast(0)
+                    params.y = (startY + dy).coerceAtLeast(0)
+                    panelParams.x = params.x; panelParams.y = params.y
                     try { windowManager?.updateViewLayout(button, params) } catch (_: Throwable) {}
+                    try { windowManager?.updateViewLayout(panel, panelParams) } catch (_: Throwable) {}
                     true
                 }
                 android.view.MotionEvent.ACTION_UP -> {
-                    if (!moved) { if (running) stopBot() else startBot() }
+                    if (!moved) setPanelVisible(!panelVisible)
                     true
                 }
                 else -> false
             }
         }
-        try { windowManager?.addView(button, params); overlayButton=button } catch (_: Throwable) { overlayButton=null }
+
+        try {
+            windowManager?.addView(button, params)
+            windowManager?.addView(panel, panelParams)
+            overlayButton = button
+            overlayPanel = panel
+            refreshOverlay()
+        } catch (_: Throwable) {
+            try { windowManager?.removeView(button) } catch (_: Throwable) {}
+            try { windowManager?.removeView(panel) } catch (_: Throwable) {}
+            overlayButton = null
+            overlayPanel = null
+        }
+    }
+
+    private fun setPanelVisible(show: Boolean) {
+        panelVisible = show
+        overlayPanel?.visibility = if (show) View.VISIBLE else View.GONE
+        overlayButton?.visibility = if (show) View.GONE else View.VISIBLE
+        refreshOverlay()
+    }
+
+    fun refreshOverlay() {
+        mainHandler.post {
+            overlayStatus?.text = lastStatus
+            overlayButton?.text = when {
+                running && attackMode -> "⚔"
+                running -> "■"
+                else -> "EB"
+            }
+        }
     }
 
     private fun removeScreenshotOverlay() {
-        val button = overlayButton ?: return
-        try {
-            windowManager?.removeView(button)
-        } catch (_: Throwable) {
-        }
+        overlayButton?.let { try { windowManager?.removeView(it) } catch (_: Throwable) {} }
+        overlayPanel?.let { try { windowManager?.removeView(it) } catch (_: Throwable) {} }
         overlayButton = null
+        overlayPanel = null
+        overlayStatus = null
+        overlayParams = null
+        panelVisible = false
         windowManager = null
     }
 
@@ -219,7 +400,11 @@ class BotAccessibilityService : AccessibilityService() {
                             }
 
                             val captured = bitmap ?: throw IllegalStateException("Brak obrazu")
-                            if (running) lastSceneMotion = updateSceneMotion(captured)
+                            if (running) {
+                                lastSceneMotion = updateSceneMotion(captured)
+                                checkAutoPotions(captured)
+                                checkAutoSkills(captured)
+                            }
                             detectMetinWithOcr(captured) { result ->
                             if (result.found) updateDetectedPosition(result.centerX, result.centerY)
                                 try {
@@ -569,6 +754,7 @@ class BotAccessibilityService : AccessibilityService() {
     private fun setOverlaySymbol(symbol: String) {
         mainHandler.post {
             try { overlayButton?.text = symbol } catch (_: Throwable) {}
+            try { overlayStatus?.text = lastStatus } catch (_: Throwable) {}
         }
     }
 
@@ -731,6 +917,15 @@ class BotAccessibilityService : AccessibilityService() {
         mainHandler.removeCallbacks(attackLoop)
         setOverlaySymbol("…")
         lastStatus = "Metin zbity — podnoszę drop"
+        if (!enabled("pickup")) {
+            missCount = 0
+            desiredMoveX = 0f
+            desiredMoveY = 0f
+            setOverlaySymbol("■")
+            lastStatus = "Pickup wyłączony — szukam następnego Metina"
+            mainHandler.postDelayed({ farmTick() }, 400L)
+            return
+        }
         captureAndPickupLoot {
             if (!running) return@captureAndPickupLoot
             missCount = 0
@@ -823,11 +1018,163 @@ class BotAccessibilityService : AccessibilityService() {
         } catch (_: Throwable) { onDone() }
     }
 
+    private fun estimateBarFill(bitmap: Bitmap, x1f: Float, x2f: Float, yf: Float, mode: Int): Float {
+        val x1 = (bitmap.width * x1f).toInt().coerceIn(0, bitmap.width - 1)
+        val x2 = (bitmap.width * x2f).toInt().coerceIn(x1 + 1, bitmap.width)
+        val y0 = (bitmap.height * yf).toInt().coerceIn(1, bitmap.height - 2)
+        var good = 0
+        var total = 0
+        for (x in x1 until x2 step 3) {
+            var hit = false
+            for (dy in -2..2) {
+                val c = bitmap.getPixel(x, (y0 + dy).coerceIn(0, bitmap.height - 1))
+                val r = android.graphics.Color.red(c)
+                val g = android.graphics.Color.green(c)
+                val b = android.graphics.Color.blue(c)
+                if (mode == 0) {
+                    if (r > 95 && r > g * 1.35f && r > b * 1.35f) hit = true
+                } else {
+                    if (b > 85 && b > r * 1.20f && b > g * 1.05f) hit = true
+                }
+            }
+            if (hit) good++
+            total++
+        }
+        return if (total == 0) 1f else good.toFloat() / total.toFloat()
+    }
+
+    private fun safeUtilityTap(x: Float, y: Float) {
+        if (!running) return
+        val doTap = { if (running) tapAt(x, y, 70L) }
+        if (activeJoystickStroke != null) finishJoystickGesture(doTap) else doTap()
+    }
+
+    private fun checkAutoPotions(bitmap: Bitmap) {
+        if (!enabled("auto_potions")) return
+        val now = System.currentTimeMillis()
+        val hp = estimateBarFill(bitmap, 0.060f, 0.220f, 0.052f, 0)
+        val mp = estimateBarFill(bitmap, 0.060f, 0.220f, 0.094f, 1)
+        val w = bitmap.width.toFloat()
+        val h = bitmap.height.toFloat()
+
+        if (hp in 0.04f..0.62f && now - lastHpPotionAt > 1200L) {
+            lastHpPotionAt = now
+            safeUtilityTap(w * 0.831f, h * 0.855f)
+            lastStatus = "Auto Potka HP (${(hp * 100).toInt()}%)"
+            return
+        }
+        if (mp in 0.04f..0.36f && now - lastMpPotionAt > 1500L) {
+            lastMpPotionAt = now
+            // Default MP slot: quick-slot directly above the HP potion slot.
+            safeUtilityTap(w * 0.831f, h * 0.760f)
+            lastStatus = "Auto Potka MP (${(mp * 100).toInt()}%)"
+        }
+    }
+
+    private fun skillLooksReady(bitmap: Bitmap, cx: Float, cy: Float): Boolean {
+        val x0 = (bitmap.width * cx).toInt()
+        val y0 = (bitmap.height * cy).toInt()
+        var bright = 0
+        var samples = 0
+        val radius = (bitmap.height * 0.022f).toInt().coerceAtLeast(5)
+        for (dy in -radius..radius step 4) {
+            for (dx in -radius..radius step 4) {
+                if (dx * dx + dy * dy > radius * radius) continue
+                val x = (x0 + dx).coerceIn(0, bitmap.width - 1)
+                val y = (y0 + dy).coerceIn(0, bitmap.height - 1)
+                val c = bitmap.getPixel(x, y)
+                val r = android.graphics.Color.red(c)
+                val g = android.graphics.Color.green(c)
+                val b = android.graphics.Color.blue(c)
+                val max = maxOf(r, g, b)
+                val min = minOf(r, g, b)
+                if (max > 85 && (max - min) > 18) bright++
+                samples++
+            }
+        }
+        return samples > 0 && bright.toFloat() / samples.toFloat() > 0.16f
+    }
+
+    private fun checkAutoSkills(bitmap: Bitmap) {
+        if (!attackMode || !enabled("auto_skills")) return
+        val slots = arrayOf(
+            0.870f to 0.590f,
+            0.922f to 0.595f,
+            0.831f to 0.640f
+        )
+        val now = System.currentTimeMillis()
+        for (i in slots.indices) {
+            if (now - skillLastTapAt[i] < 1400L) continue
+            val (x, y) = slots[i]
+            if (skillLooksReady(bitmap, x, y)) {
+                skillLastTapAt[i] = now
+                tapAt(bitmap.width * x, bitmap.height * y, 70L)
+                lastStatus = "Auto Skill ${i + 1}"
+                break
+            }
+        }
+    }
+
+    private fun maybeCheckRevive() {
+        if (!running || !enabled("auto_revive")) return
+        val now = System.currentTimeMillis()
+        if (now - lastReviveScanAt < 3500L) return
+        lastReviveScanAt = now
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        try {
+            takeScreenshot(
+                android.view.Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        var bitmap: Bitmap? = null
+                        try {
+                            val buffer = screenshot.hardwareBuffer
+                            try {
+                                val hw = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace) ?: return
+                                bitmap = hw.copy(Bitmap.Config.ARGB_8888, false)
+                                hw.recycle()
+                            } finally { buffer.close() }
+                            val img = bitmap ?: return
+                            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                            recognizer.process(InputImage.fromBitmap(img, 0))
+                                .addOnSuccessListener { text ->
+                                    var target: Rect? = null
+                                    outer@ for (block in text.textBlocks) {
+                                        for (line in block.lines) {
+                                            val n = line.text.lowercase(Locale.getDefault())
+                                                .replace("ę", "e").replace("ą", "a").replace("ł", "l")
+                                                .replace("ś", "s").replace("ć", "c").replace("ń", "n")
+                                                .replace("ó", "o").replace("ź", "z").replace("ż", "z")
+                                            if (n.contains("wskrzes") || n.contains("odrodz") || n.contains("powstan") || n.contains("wstan")) {
+                                                target = line.boundingBox
+                                                break@outer
+                                            }
+                                        }
+                                    }
+                                    recognizer.close()
+                                    target?.let { box ->
+                                        safeUtilityTap(box.centerX().toFloat(), box.centerY().toFloat())
+                                        lastStatus = "Auto Revive"
+                                    }
+                                    bitmap?.recycle()
+                                }
+                                .addOnFailureListener { recognizer.close(); bitmap?.recycle() }
+                        } catch (_: Throwable) { bitmap?.recycle() }
+                    }
+                    override fun onFailure(errorCode: Int) = Unit
+                }
+            )
+        } catch (_: Throwable) { }
+    }
+
     private fun resetProgressWatch() {
         progressAnchorAt = 0L
         progressAnchorX = 0
         progressAnchorY = 0
         lowMotionFrames = 0
+        bestApproachError = Float.MAX_VALUE
+        lastMeaningfulProgressAt = 0L
     }
 
     private fun beginAvoidance(dx: Float) {
@@ -838,7 +1185,7 @@ class BotAccessibilityService : AccessibilityService() {
             -avoidDirection
         }
         avoidPhase = 1
-        avoidPhaseTicks = 2
+        avoidPhaseTicks = 3
         resetProgressWatch()
         lastStatus = "UTKNIĘCIE — cofam i obchodzę przeszkodę"
         setOverlaySymbol("↪")
@@ -848,26 +1195,26 @@ class BotAccessibilityService : AccessibilityService() {
         if (avoidPhase == 0) return false
         when (avoidPhase) {
             1 -> {
-                desiredMoveX = avoidDirection * 0.28f
-                desiredMoveY = 0.62f
+                desiredMoveX = avoidDirection * 0.35f
+                desiredMoveY = 0.82f
                 avoidPhaseTicks--
                 if (avoidPhaseTicks <= 0) {
                     avoidPhase = 2
-                    avoidPhaseTicks = if (avoidAttempts >= 3) 5 else 4
+                    avoidPhaseTicks = if (avoidAttempts >= 3) 7 else 5
                 }
             }
             2 -> {
-                desiredMoveX = avoidDirection * 0.90f
-                desiredMoveY = -0.10f
+                desiredMoveX = avoidDirection * 0.92f
+                desiredMoveY = -0.18f
                 avoidPhaseTicks--
                 if (avoidPhaseTicks <= 0) {
                     avoidPhase = 3
-                    avoidPhaseTicks = if (avoidAttempts >= 3) 5 else 4
+                    avoidPhaseTicks = if (avoidAttempts >= 3) 7 else 5
                 }
             }
             3 -> {
-                desiredMoveX = avoidDirection * 0.62f
-                desiredMoveY = -0.72f
+                desiredMoveX = avoidDirection * 0.76f
+                desiredMoveY = -0.82f
                 avoidPhaseTicks--
                 if (avoidPhaseTicks <= 0) {
                     avoidPhase = 0
@@ -890,6 +1237,7 @@ class BotAccessibilityService : AccessibilityService() {
 
     private fun farmTick() {
         if (!running) return
+        maybeCheckRevive()
 
         captureAndDetectMetin { found, _ ->
             if (!running) return@captureAndDetectMetin
@@ -976,37 +1324,35 @@ class BotAccessibilityService : AccessibilityService() {
             val commanded = kotlin.math.sqrt(
                 desiredMoveX * desiredMoveX + desiredMoveY * desiredMoveY
             )
+            val approachError = kotlin.math.sqrt(
+                (dx / w) * (dx / w) + (dy / h) * (dy / h)
+            )
 
             if (commanded > 0.30f) {
-                if (lastSceneMotion < 4.8f) lowMotionFrames++ else lowMotionFrames = 0
-
                 if (progressAnchorAt == 0L) {
                     progressAnchorAt = now
                     progressAnchorX = lastDetectedX
                     progressAnchorY = lastDetectedY
+                    bestApproachError = approachError
+                    lastMeaningfulProgressAt = now
                 } else {
-                    val pdx = (lastDetectedX - progressAnchorX).toFloat()
-                    val pdy = (lastDetectedY - progressAnchorY).toFloat()
-                    val netTargetShift = kotlin.math.sqrt(pdx * pdx + pdy * pdy)
-                    val watchedFor = now - progressAnchorAt
-                    val weakTargetProgress = netTargetShift < w * 0.040f
-                    val visuallyStationary = lowMotionFrames >= 3
-                    val timedOutWithLittleProgress = watchedFor >= 2600L && weakTargetProgress
+                    // Real progress means the target is getting closer to the attack zone,
+                    // not merely that pixels/camera/animation changed.
+                    if (approachError < bestApproachError - 0.022f) {
+                        bestApproachError = approachError
+                        lastMeaningfulProgressAt = now
+                        progressAnchorX = lastDetectedX
+                        progressAnchorY = lastDetectedY
+                        avoidAttempts = 0
+                    }
 
-                    if ((watchedFor >= 1500L && visuallyStationary && weakTargetProgress) ||
-                        timedOutWithLittleProgress) {
+                    val noRealProgressFor = now - lastMeaningfulProgressAt
+                    val hardTimeout = now - progressAnchorAt
+                    if (noRealProgressFor >= 2100L || hardTimeout >= 4200L) {
                         beginAvoidance(dx)
                         applyAvoidanceStep()
                         mainHandler.postDelayed({ farmTick() }, 470L)
                         return@captureAndDetectMetin
-                    }
-
-                    if (netTargetShift >= w * 0.065f || watchedFor >= 3000L) {
-                        progressAnchorAt = now
-                        progressAnchorX = lastDetectedX
-                        progressAnchorY = lastDetectedY
-                        lowMotionFrames = 0
-                        if (netTargetShift >= w * 0.065f) avoidAttempts = 0
                     }
                 }
             } else {
@@ -1029,6 +1375,10 @@ class BotAccessibilityService : AccessibilityService() {
 
     fun startBot() {
         if (running) return
+        if (!enabled("farmbot")) {
+            lastStatus = "Farmbot jest wyłączony w ustawieniach"
+            return
+        }
         missCount = 0
         searchStep = 0
         lastMoveX = 0f
@@ -1045,6 +1395,12 @@ class BotAccessibilityService : AccessibilityService() {
         avoidPhaseTicks = 0
         avoidDirection = 1f
         avoidAttempts = 0
+        bestApproachError = Float.MAX_VALUE
+        lastMeaningfulProgressAt = 0L
+        skillLastTapAt.fill(0L)
+        lastHpPotionAt = 0L
+        lastMpPotionAt = 0L
+        lastReviveScanAt = 0L
         running = true
         lastStatus = "ElderBot: SZUKAM METINA..."
         setOverlaySymbol("■")

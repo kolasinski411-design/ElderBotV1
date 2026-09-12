@@ -1,5 +1,9 @@
-# ElderBot V0.10 FARM LOOP
+# ElderBot Mobile V0.12
 
-OCR Metina → płynne podejście → mocniejsze wykrywanie utknięcia (ruch sceny + ruch celu) → 3-etapowe obejście przeszkody → ponowne namierzenie → atak → loot → następny cel.
+Etap finalny aktualnego rdzenia mobilnego: panel overlay dostępny nad grą, Farmbot, Pickup, Auto Skills, Auto Potions, Auto Revive oraz reaktywny anti-stuck.
 
-V0.10: po wykryciu blokady bot cofa, odchodzi zdecydowanie bokiem, a potem wraca łukiem do celu. Przy kolejnej blokadzie zmienia stronę obejścia.
+Wszystkie akcje są realizowane przez analizę obrazu/OCR i Android Accessibility. Aplikacja nie modyfikuje klienta gry.
+
+Panel overlay: pływający przycisk `EB` -> panel modułów -> START/STOP bez wychodzenia z gry.
+
+Auto Mining i Auto Fishing są przewidziane jako kolejne moduły, ale nie są aktywne w V0.12.
