@@ -71,6 +71,7 @@ class MainActivity : Activity() {
             setPadding(8, 4, 8, 10)
             addView(section("AUTOMATYZACJA"))
             addView(option("Farmbot • Metiny", "farmbot"))
+            addView(option("Bossy / Minibossy M1 + M2", "auto_boss", true))
             addView(option("Auto EXP • Moby", "auto_exp", false))
             addView(option("Pickup", "pickup"))
             addView(option("Auto Skills", "auto_skills"))
@@ -82,7 +83,7 @@ class MainActivity : Activity() {
             })
             addView(section("CELE"))
             addView(TextView(this@MainActivity).apply {
-                text = "Metiny: aktywne\nAuto EXP: moby z czerwonymi nazwami"
+                text = "Priorytet: BOSS > METIN > EXP\nBossy M1/M2 + Auto EXP"
                 textSize = 14f; setTextColor(Color.LTGRAY); setPadding(18, 4, 18, 10)
             })
             addView(section("MODUŁY ROZSZERZEŃ"))

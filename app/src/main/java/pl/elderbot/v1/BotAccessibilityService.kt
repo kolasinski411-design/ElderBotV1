@@ -50,6 +50,7 @@ class BotAccessibilityService : AccessibilityService() {
     @Volatile private var lastStatus = "Usługa gotowa"
     @Volatile private var lastDetectedX = 0
     @Volatile private var lastDetectedY = 0
+    @Volatile private var lastTargetKind = "METIN"
     private var missCount = 0
     private var searchStep = 0
     private var lastMoveX = 0f
@@ -249,6 +250,7 @@ class BotAccessibilityService : AccessibilityService() {
         }
 
         addToggle("Farmbot • Metiny", "farmbot")
+        addToggle("Bossy / Minibossy M1 + M2", "auto_boss", true)
         addToggle("Auto EXP • Moby", "auto_exp", false)
         addToggle("Pickup", "pickup")
         addToggle("Auto Skills", "auto_skills")
@@ -263,7 +265,7 @@ class BotAccessibilityService : AccessibilityService() {
         scrollContent.addView(calibrateSkills, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
 
         val targetInfo = TextView(this).apply {
-            text = "CEL: METINY / AUTO EXP   •   NAV: SAFE"
+            text = "PRIORYTET: BOSS > METIN > EXP   •   NAV: SAFE"
             textSize = 11f
             setTextColor(Color.rgb(150, 178, 255))
             setPadding(dp(5), dp(6), dp(5), dp(6))
@@ -525,6 +527,7 @@ class BotAccessibilityService : AccessibilityService() {
 
                 var bestBox: Rect? = null
                 var bestScore = Int.MIN_VALUE
+                var bestKind = "METIN"
 
                 for (block in text.textBlocks) {
                     for (line in block.lines) {
@@ -535,20 +538,33 @@ class BotAccessibilityService : AccessibilityService() {
                         if (!box.intersect(gameplay)) continue
                         val redScore = countRedPixelsNear(bitmap, box)
                         val expMode = enabled("auto_exp", false)
+                        val bossMode = enabled("auto_boss", true)
                         val isMetin = normalized.contains("metin")
+                        val bossNames = listOf(
+                            "lykos", "scrofa", "bera", "tigris",
+                            "cung mok", "junghyul", "jug hyul", "mi jung", "se rang", "jin hee",
+                            "mahon", "bo", "goo pae", "chuong", "best kapitan", "bestialski kapitan"
+                        )
+                        val compact = normalized.replace("-", " ").replace(".", " ").replace(Regex("\\s+"), " ").trim()
+                        val isBoss = bossNames.any { compact.contains(it) }
                         val uiNoise = normalized.contains("yang") || normalized.contains("poziom") ||
                             normalized.contains("elderbot") || normalized.contains("szukam") || normalized.length < 3
-                        if (!isMetin && !(expMode && !uiNoise && redScore > 18)) continue
+                        if (!(isBoss && bossMode) && !isMetin && !(expMode && !uiNoise && redScore > 18)) continue
 
-                        val cx = (box.left + box.right) / 2
                         val labelWidth = box.width().coerceAtLeast(1)
                         val labelHeight = box.height().coerceAtLeast(1)
                         val sizeScore = 100 - kotlin.math.abs(labelWidth - 90) - kotlin.math.abs(labelHeight - 18) * 2
-                        val score = redScore * 4 + sizeScore
+                        val priority = when {
+                            isBoss && bossMode -> 20000
+                            isMetin -> 10000
+                            else -> 0
+                        }
+                        val score = priority + redScore * 4 + sizeScore
 
                         if (score > bestScore) {
                             bestScore = score
                             bestBox = Rect(box)
+                            bestKind = when { isBoss -> "BOSS"; isMetin -> "METIN"; else -> "EXP" }
                         }
                     }
                 }
@@ -560,7 +576,9 @@ class BotAccessibilityService : AccessibilityService() {
                     return@addOnSuccessListener
                 }
 
-                // The label is above the stone. Use a generous, colour-independent target area
+                lastTargetKind = bestKind
+
+                // The label is above the target. Use a generous, colour-independent target area
                 // below the text so different Metin auras do not affect detection.
                 val left = (label.centerX() - 65).coerceAtLeast(gameplay.left)
                 val right = (label.centerX() + 65).coerceAtMost(gameplay.right)
@@ -732,6 +750,7 @@ class BotAccessibilityService : AccessibilityService() {
         // Give candidates with nearby red text a strong preference.
         var best: Rect? = null
         var bestScore = Int.MIN_VALUE
+                var bestKind = "METIN"
         for (rect in blobs) {
             val cx = (rect.left + rect.right) / 2
             val redBoxLeft = (cx - 130).coerceAtLeast(left)
@@ -1437,11 +1456,11 @@ class BotAccessibilityService : AccessibilityService() {
                     if (System.currentTimeMillis() - lastTargetTapAt > 1800L) {
                         tapDetectedMetin()
                     }
-                    lastStatus = if (enabled("auto_exp", false)) "Auto EXP: walczę..." else "Biję Metina do końca..."
+                    lastStatus = when (lastTargetKind) { "BOSS" -> "Biję bossa / minibossa..."; "EXP" -> "Auto EXP: walczę..."; else -> "Biję Metina do końca..." }
                     mainHandler.postDelayed({ farmTick() }, 560L)
                 } else {
                     attackMisses++
-                    lastStatus = "Sprawdzam czy Metin padł... ($attackMisses/4)"
+                    lastStatus = "Sprawdzam czy cel padł... ($attackMisses/4)"
                     if (attackMisses >= 4) {
                         finishAttackAndPickup()
                     } else {
@@ -1460,7 +1479,7 @@ class BotAccessibilityService : AccessibilityService() {
                     return@captureAndDetectMetin
                 }
 
-                lastStatus = if (enabled("auto_exp", false)) "Auto EXP: szukam mobów..." else "Szukam Metina na trasie..."
+                lastStatus = when { enabled("auto_boss", true) -> "Szukam: bossy > Metiny > EXP..."; enabled("auto_exp", false) -> "Auto EXP: szukam mobów..."; else -> "Szukam Metina na trasie..." }
                 if (missCount >= 2) {
                     applyPatrolRoute()
                 } else {
@@ -1495,7 +1514,7 @@ class BotAccessibilityService : AccessibilityService() {
             if (!inCaptureCorridor) {
                 resetProgressWatch()
                 applyPatrolRoute()
-                lastStatus = "${currentMapLabel}: Metin widoczny • trzymam bezpieczną trasę"
+                lastStatus = "${currentMapLabel}: $lastTargetKind widoczny • trzymam bezpieczną trasę"
                 setOverlaySymbol("◇")
                 mainHandler.postDelayed({ farmTick() }, 540L)
                 return@captureAndDetectMetin
@@ -1583,8 +1602,8 @@ class BotAccessibilityService : AccessibilityService() {
 
     fun startBot() {
         if (running) return
-        if (!enabled("farmbot") && !enabled("auto_exp", false)) {
-            lastStatus = "Włącz Farmbot lub Auto EXP"
+        if (!enabled("farmbot") && !enabled("auto_boss", true) && !enabled("auto_exp", false)) {
+            lastStatus = "Włącz Metiny, Bossy lub Auto EXP"
             return
         }
         missCount = 0

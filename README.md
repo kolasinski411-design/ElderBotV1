@@ -1,9 +1,12 @@
-# ElderBot V0.18 UI FIX
+# ElderBot V0.19 MULTI TARGET
 
-Zmiany względem V0.17:
-- START / STOP przeniesione na stałe na górę panelu,
-- ustawienia i moduły są przewijane pionowo,
-- przycisk uruchomienia nie znika już poza ekranem,
-- zachowane funkcje V0.17: Farmbot, Auto EXP, Pickup, Auto Skills, Auto Potions, Auto Revive i Safe Approach.
+Zmiany:
+- osobny moduł Bossy / Minibossy M1 + M2,
+- priorytet celów: BOSS/MINIBOSS > METIN > EXP,
+- M1: Lykos, Scrofa, Bera, Tigris, Cung-Mok, Jug-Hyul, Mi-Jung, Se-Rang, Jin-Hee,
+- M2: Mahon, Bo, Goo-Pae, Chuong, Bestialski Kapitan,
+- START/STOP nadal stale na górze,
+- ustawienia nadal przewijane pionowo,
+- zachowane Pickup przez ikonę ręki, Auto Skills, Auto Potions, Auto Revive i Safe Approach.
 
-Sterowanie pozostaje ekran/OCR/Accessibility — bez ingerencji w klienta gry.
+Sterowanie wyłącznie przez ekran/OCR/Accessibility.
