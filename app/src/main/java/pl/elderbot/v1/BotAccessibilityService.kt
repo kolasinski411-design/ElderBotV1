@@ -39,6 +39,12 @@ class BotAccessibilityService : AccessibilityService() {
     private var windowManager: WindowManager? = null
     @Volatile private var running = false
     @Volatile private var lastStatus = "Usługa gotowa"
+    @Volatile private var lastDetectedX = 0
+    @Volatile private var lastDetectedY = 0
+    private var missCount = 0
+    private var searchStep = 0
+    private var lastMoveX = 0f
+    private var lastMoveY = 0f
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -61,89 +67,40 @@ class BotAccessibilityService : AccessibilityService() {
      */
     private fun showScreenshotOverlay() {
         if (overlayButton != null) return
-
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-
         val button = Button(this).apply {
             text = "▶"
             textSize = 18f
             alpha = 0.72f
             setPadding(0, 0, 0, 0)
         }
-
         val params = WindowManager.LayoutParams(
-            105,
-            105,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
+            105, 105,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             android.graphics.PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = 12
-            y = 210
-        }
-
-        var startX = 0
-        var startY = 0
-        var touchX = 0f
-        var touchY = 0f
-        var moved = false
-
-        button.setOnTouchListener { v, event ->
+        ).apply { gravity = Gravity.TOP or Gravity.END; x = 12; y = 210 }
+        var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f; var moved = false
+        button.setOnTouchListener { _, event ->
             when (event.action) {
                 android.view.MotionEvent.ACTION_DOWN -> {
-                    startX = params.x
-                    startY = params.y
-                    touchX = event.rawX
-                    touchY = event.rawY
-                    moved = false
-                    true
+                    startX=params.x; startY=params.y; touchX=event.rawX; touchY=event.rawY; moved=false; true
                 }
-
                 android.view.MotionEvent.ACTION_MOVE -> {
-                    val dx = (touchX - event.rawX).toInt()
-                    val dy = (event.rawY - touchY).toInt()
-
-                    if (kotlin.math.abs(dx) > 8 || kotlin.math.abs(dy) > 8) {
-                        moved = true
-                    }
-
-                    params.x = (startX + dx).coerceAtLeast(0)
-                    params.y = (startY + dy).coerceAtLeast(0)
-
-                    try {
-                        windowManager?.updateViewLayout(button, params)
-                    } catch (_: Throwable) {
-                    }
+                    val dx=(touchX-event.rawX).toInt(); val dy=(event.rawY-touchY).toInt()
+                    if (kotlin.math.abs(dx)>8 || kotlin.math.abs(dy)>8) moved=true
+                    params.x=(startX+dx).coerceAtLeast(0); params.y=(startY+dy).coerceAtLeast(0)
+                    try { windowManager?.updateViewLayout(button, params) } catch (_: Throwable) {}
                     true
                 }
-
                 android.view.MotionEvent.ACTION_UP -> {
-                    if (!moved) {
-                        if (running) {
-                            stopBot()
-                            button.text = "▶"
-                        } else {
-                            startBot()
-                            button.text = "■"
-                        }
-                    }
+                    if (!moved) { if (running) stopBot() else startBot() }
                     true
                 }
-
                 else -> false
             }
         }
-
-        try {
-            windowManager?.addView(button, params)
-            overlayButton = button
-        } catch (_: Throwable) {
-            overlayButton = null
-        }
+        try { windowManager?.addView(button, params); overlayButton=button } catch (_: Throwable) { overlayButton=null }
     }
 
     private fun removeScreenshotOverlay() {
@@ -265,9 +222,10 @@ class BotAccessibilityService : AccessibilityService() {
                                             paint
                                         )
                                     }
-                                    saveBitmap(annotated)
+                                    if (!running) saveBitmap(annotated)
                                     annotated.recycle()
 
+                                    if (result.found) { lastDetectedX = result.centerX; lastDetectedY = result.centerY }
                                     lastStatus = if (result.found) {
                                         "Metin znaleziony: X=${result.centerX}, Y=${result.centerY}"
                                     } else {
@@ -677,6 +635,57 @@ private fun updateDetectedPosition(x: Int, y: Int) {
     lastDetectedX = x
     lastDetectedY = y
 }
+
+    private fun moveJoystick(dx: Float, dy: Float, duration: Long = 420L) {
+        if (!running) return
+        val m=resources.displayMetrics; val w=m.widthPixels.toFloat(); val h=m.heightPixels.toFloat()
+        val sx=w*0.13f; val sy=h*0.77f; val radius=w*0.055f
+        val ex=sx+radius*dx.coerceIn(-1f,1f); val ey=sy+radius*dy.coerceIn(-1f,1f)
+        val path=Path().apply { moveTo(sx,sy); lineTo(ex,ey) }
+        val stroke=GestureDescription.StrokeDescription(path,0,duration)
+        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(),null,null)
+    }
+
+    private fun tapAttackButton() {
+        if (!running) return
+        val m=resources.displayMetrics
+        val path=Path().apply { moveTo(m.widthPixels*0.89f,m.heightPixels*0.76f) }
+        val stroke=GestureDescription.StrokeDescription(path,0,70L)
+        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(),null,null)
+    }
+
+    private fun farmTick() {
+        if (!running) return
+        captureAndDetectMetin { found, _ ->
+            if (!running) return@captureAndDetectMetin
+            val m=resources.displayMetrics; val w=m.widthPixels.toFloat(); val h=m.heightPixels.toFloat()
+            if (!found) {
+                missCount++
+                lastStatus="Szukam Metina..."
+                if (missCount>=2) {
+                    val pattern=arrayOf(0.00f to -0.52f, 0.34f to -0.44f, 0.00f to -0.52f, -0.34f to -0.44f)
+                    val p=pattern[searchStep % pattern.size]; searchStep++
+                    lastMoveX=p.first; lastMoveY=p.second; moveJoystick(p.first,p.second,300L)
+                }
+                mainHandler.postDelayed({ farmTick() },650L); return@captureAndDetectMetin
+            }
+            missCount=0
+            val dx=lastDetectedX-w*0.50f; val dy=lastDetectedY-h*0.48f
+            val centered=kotlin.math.abs(dx)<w*0.10f && kotlin.math.abs(dy)<h*0.17f
+            if (centered) {
+                lastMoveX=0f; lastMoveY=0f; lastStatus="Metin blisko — ATAK"; tapAttackButton()
+                mainHandler.postDelayed({ farmTick() },480L); return@captureAndDetectMetin
+            }
+            val tx=(dx/(w*0.34f)).coerceIn(-0.90f,0.90f)
+            val ty=(dy/(h*0.34f)).coerceIn(-0.90f,0.90f)
+            val mx=(lastMoveX*0.35f+tx*0.65f).coerceIn(-0.90f,0.90f)
+            val my=(lastMoveY*0.35f+ty*0.65f).coerceIn(-0.90f,0.90f)
+            lastMoveX=mx; lastMoveY=my
+            moveJoystick(mx,my,360L)
+            lastStatus="Podejście do Metina: X=${dx.toInt()} Y=${dy.toInt()}"
+            mainHandler.postDelayed({ farmTick() },430L)
+        }
+    }
 
 fun startBot() {
     if (running) return
