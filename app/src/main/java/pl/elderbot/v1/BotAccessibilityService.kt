@@ -26,6 +26,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Switch
+import android.widget.ScrollView
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import java.text.SimpleDateFormat
@@ -195,42 +196,7 @@ class BotAccessibilityService : AccessibilityService() {
         overlayStatus = stat
         panel.addView(stat)
 
-        fun addToggle(label: String, key: String, defaultValue: Boolean = true) {
-            val sw = Switch(this).apply {
-                text = label
-                textSize = 13f
-                setTextColor(Color.WHITE)
-                isChecked = enabled(key, defaultValue)
-                setPadding(dp(4), 0, dp(4), 0)
-                setOnCheckedChangeListener { _, checked ->
-                    prefs().edit().putBoolean(key, checked).apply()
-                }
-            }
-            panel.addView(sw, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
-        }
-
-        addToggle("Farmbot • Metiny", "farmbot")
-        addToggle("Auto EXP • Moby", "auto_exp", false)
-        addToggle("Pickup", "pickup")
-        addToggle("Auto Skills", "auto_skills")
-        addToggle("Auto Potions", "auto_potions")
-        addToggle("Auto Revive", "auto_revive")
-
-        val calibrateSkills = Button(this).apply {
-            text = "KALIBRUJ 3 SKILLE"
-            textSize = 11f
-            setOnClickListener { setPanelVisible(false); startSkillCalibration() }
-        }
-        panel.addView(calibrateSkills, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
-
-        val targetInfo = TextView(this).apply {
-            text = "CEL: METINY / AUTO EXP   •   NAV: SAFE"
-            textSize = 11f
-            setTextColor(Color.rgb(150, 178, 255))
-            setPadding(dp(5), dp(6), dp(5), dp(6))
-        }
-        panel.addView(targetInfo)
-
+        // START/STOP stays fixed at the top so the bot can always be controlled.
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -249,24 +215,79 @@ class BotAccessibilityService : AccessibilityService() {
         controls.addView(stop, LinearLayout.LayoutParams(0, dp(44), 1f))
         panel.addView(controls)
 
+        // Everything below the main controls is scrollable. This keeps future modules
+        // accessible without ever pushing START/STOP outside the screen.
+        val scrollContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val scroll = ScrollView(this).apply {
+            isFillViewport = false
+            isVerticalScrollBarEnabled = true
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            addView(scrollContent, ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT,
+                ScrollView.LayoutParams.WRAP_CONTENT
+            ))
+        }
+        panel.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+        ))
+
+        fun addToggle(label: String, key: String, defaultValue: Boolean = true) {
+            val sw = Switch(this).apply {
+                text = label
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                isChecked = enabled(key, defaultValue)
+                setPadding(dp(4), 0, dp(4), 0)
+                setOnCheckedChangeListener { _, checked ->
+                    prefs().edit().putBoolean(key, checked).apply()
+                }
+            }
+            scrollContent.addView(sw, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
+        }
+
+        addToggle("Farmbot • Metiny", "farmbot")
+        addToggle("Auto EXP • Moby", "auto_exp", false)
+        addToggle("Pickup", "pickup")
+        addToggle("Auto Skills", "auto_skills")
+        addToggle("Auto Potions", "auto_potions")
+        addToggle("Auto Revive", "auto_revive")
+
+        val calibrateSkills = Button(this).apply {
+            text = "KALIBRUJ 3 SKILLE"
+            textSize = 11f
+            setOnClickListener { setPanelVisible(false); startSkillCalibration() }
+        }
+        scrollContent.addView(calibrateSkills, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+
+        val targetInfo = TextView(this).apply {
+            text = "CEL: METINY / AUTO EXP   •   NAV: SAFE"
+            textSize = 11f
+            setTextColor(Color.rgb(150, 178, 255))
+            setPadding(dp(5), dp(6), dp(5), dp(6))
+        }
+        scrollContent.addView(targetInfo)
+
         val future = TextView(this).apply {
             text = "⛏ Mining   •   🎣 Fishing  [kolejny etap]"
             textSize = 11f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
-            setPadding(dp(2), dp(8), dp(2), dp(2))
+            setPadding(dp(2), dp(8), dp(2), dp(8))
         }
-        panel.addView(future)
+        scrollContent.addView(future)
 
         val panelParams = WindowManager.LayoutParams(
-            dp(292), WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(292), dp(360),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             android.graphics.PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
             x = dp(8)
-            y = dp(150)
+            y = dp(12)
         }
 
         var startX = 0; var startY = 0; var touchX = 0f; var touchY = 0f; var moved = false
