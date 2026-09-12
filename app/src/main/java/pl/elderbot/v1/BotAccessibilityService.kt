@@ -52,11 +52,14 @@ class BotAccessibilityService : AccessibilityService() {
     private var attackMode = false
     private var attackMisses = 0
     private var lastTargetTapAt = 0L
-    private var progressSampleX = 0
-    private var progressSampleY = 0
-    private var progressSampleValid = false
-    private var stuckSamples = 0
-    private var avoidTicks = 0
+    private var progressAnchorX = 0
+    private var progressAnchorY = 0
+    private var progressAnchorAt = 0L
+    private var lowMotionFrames = 0
+    private var lastSceneMotion = 100f
+    private var previousSceneSample: IntArray? = null
+    private var avoidPhase = 0
+    private var avoidPhaseTicks = 0
     private var avoidDirection = 1f
     private var avoidAttempts = 0
 
@@ -216,6 +219,7 @@ class BotAccessibilityService : AccessibilityService() {
                             }
 
                             val captured = bitmap ?: throw IllegalStateException("Brak obrazu")
+                            if (running) lastSceneMotion = updateSceneMotion(captured)
                             detectMetinWithOcr(captured) { result ->
                             if (result.found) updateDetectedPosition(result.centerX, result.centerY)
                                 try {
@@ -337,6 +341,34 @@ class BotAccessibilityService : AccessibilityService() {
                 recognizer.close()
                 onResult(MetinDetection(false, Rect(), 0, 0))
             }
+    }
+
+    private fun updateSceneMotion(bitmap: Bitmap): Float {
+        val cols = 18
+        val rows = 9
+        val sample = IntArray(cols * rows)
+        var i = 0
+        for (ry in 0 until rows) {
+            val y = ((0.16f + 0.58f * (ry.toFloat() / (rows - 1))) * bitmap.height)
+                .toInt().coerceIn(0, bitmap.height - 1)
+            for (cx in 0 until cols) {
+                val x = ((0.14f + 0.72f * (cx.toFloat() / (cols - 1))) * bitmap.width)
+                    .toInt().coerceIn(0, bitmap.width - 1)
+                val c = bitmap.getPixel(x, y)
+                val r = android.graphics.Color.red(c)
+                val g = android.graphics.Color.green(c)
+                val b = android.graphics.Color.blue(c)
+                sample[i++] = (r * 30 + g * 59 + b * 11) / 100
+            }
+        }
+
+        val previous = previousSceneSample
+        previousSceneSample = sample
+        if (previous == null || previous.size != sample.size) return 100f
+
+        var diff = 0L
+        for (k in sample.indices) diff += kotlin.math.abs(sample[k] - previous[k])
+        return diff.toFloat() / sample.size.toFloat()
     }
 
     private fun countRedPixelsNear(bitmap: Bitmap, box: Rect): Int {
@@ -791,6 +823,71 @@ class BotAccessibilityService : AccessibilityService() {
         } catch (_: Throwable) { onDone() }
     }
 
+    private fun resetProgressWatch() {
+        progressAnchorAt = 0L
+        progressAnchorX = 0
+        progressAnchorY = 0
+        lowMotionFrames = 0
+    }
+
+    private fun beginAvoidance(dx: Float) {
+        avoidAttempts++
+        avoidDirection = if (avoidAttempts % 2 == 1) {
+            if (dx >= 0f) -1f else 1f
+        } else {
+            -avoidDirection
+        }
+        avoidPhase = 1
+        avoidPhaseTicks = 2
+        resetProgressWatch()
+        lastStatus = "UTKNIĘCIE — cofam i obchodzę przeszkodę"
+        setOverlaySymbol("↪")
+    }
+
+    private fun applyAvoidanceStep(): Boolean {
+        if (avoidPhase == 0) return false
+        when (avoidPhase) {
+            1 -> {
+                desiredMoveX = avoidDirection * 0.28f
+                desiredMoveY = 0.62f
+                avoidPhaseTicks--
+                if (avoidPhaseTicks <= 0) {
+                    avoidPhase = 2
+                    avoidPhaseTicks = if (avoidAttempts >= 3) 5 else 4
+                }
+            }
+            2 -> {
+                desiredMoveX = avoidDirection * 0.90f
+                desiredMoveY = -0.10f
+                avoidPhaseTicks--
+                if (avoidPhaseTicks <= 0) {
+                    avoidPhase = 3
+                    avoidPhaseTicks = if (avoidAttempts >= 3) 5 else 4
+                }
+            }
+            3 -> {
+                desiredMoveX = avoidDirection * 0.62f
+                desiredMoveY = -0.72f
+                avoidPhaseTicks--
+                if (avoidPhaseTicks <= 0) {
+                    avoidPhase = 0
+                    avoidPhaseTicks = 0
+                    resetProgressWatch()
+                }
+            }
+        }
+        lastMoveX = desiredMoveX
+        lastMoveY = desiredMoveY
+        lastStatus = when (avoidPhase) {
+            1 -> "Omijanie: odsuwam się od przeszkody"
+            2 -> "Omijanie: idę bokiem"
+            3 -> "Omijanie: wracam łukiem do celu"
+            else -> "Ponownie namierzam Metina..."
+        }
+        setOverlaySymbol("↪")
+        return true
+    }
+
     private fun farmTick() {
         if (!running) return
 
@@ -804,42 +901,39 @@ class BotAccessibilityService : AccessibilityService() {
             if (attackMode) {
                 if (found) {
                     attackMisses = 0
-                    if (System.currentTimeMillis() - lastTargetTapAt > 2200L) {
+                    if (System.currentTimeMillis() - lastTargetTapAt > 1800L) {
                         tapDetectedMetin()
                     }
-                    lastStatus = "Biję Metina..."
-                    mainHandler.postDelayed({ farmTick() }, 650L)
+                    lastStatus = "Biję Metina do końca..."
+                    mainHandler.postDelayed({ farmTick() }, 560L)
                 } else {
                     attackMisses++
-                    lastStatus = "Sprawdzam czy Metin padł... ($attackMisses/3)"
-                    if (attackMisses >= 3) {
+                    lastStatus = "Sprawdzam czy Metin padł... ($attackMisses/4)"
+                    if (attackMisses >= 4) {
                         finishAttackAndPickup()
                     } else {
-                        mainHandler.postDelayed({ farmTick() }, 600L)
+                        mainHandler.postDelayed({ farmTick() }, 520L)
                     }
                 }
                 return@captureAndDetectMetin
             }
 
             if (!found) {
-                progressSampleValid = false
-                stuckSamples = 0
+                resetProgressWatch()
                 missCount++
-                lastStatus = "Szukam Metina..."
 
-                if (avoidTicks > 0) {
-                    // Continue the current obstacle-avoidance arc even if OCR
-                    // temporarily loses the target behind scenery/effects.
-                    desiredMoveX = avoidDirection * 0.74f
-                    desiredMoveY = -0.52f
-                    avoidTicks--
-                    setOverlaySymbol("↪")
-                } else if (missCount >= 2) {
+                if (applyAvoidanceStep()) {
+                    mainHandler.postDelayed({ farmTick() }, 470L)
+                    return@captureAndDetectMetin
+                }
+
+                lastStatus = "Szukam Metina..."
+                if (missCount >= 2) {
                     val pattern = arrayOf(
-                        0.00f to -0.58f,
-                        0.30f to -0.54f,
-                        0.00f to -0.58f,
-                        -0.30f to -0.54f
+                        0.00f to -0.60f,
+                        0.34f to -0.56f,
+                        0.00f to -0.60f,
+                        -0.34f to -0.56f
                     )
                     val p = pattern[searchStep % pattern.size]
                     searchStep++
@@ -850,99 +944,85 @@ class BotAccessibilityService : AccessibilityService() {
                     desiredMoveX = 0f
                     desiredMoveY = 0f
                 }
-                mainHandler.postDelayed({ farmTick() }, 560L)
+                mainHandler.postDelayed({ farmTick() }, 520L)
                 return@captureAndDetectMetin
             }
 
             missCount = 0
-            setOverlaySymbol("■")
-
             val dx = lastDetectedX - w * 0.50f
             val dy = lastDetectedY - h * 0.48f
 
-            val aligned = kotlin.math.abs(dx) < w * 0.16f
-            val attackRangeOnScreen = dy > -h * 0.39f && dy < h * 0.22f
+            if (applyAvoidanceStep()) {
+                mainHandler.postDelayed({ farmTick() }, 470L)
+                return@captureAndDetectMetin
+            }
+
+            setOverlaySymbol("■")
+
+            val aligned = kotlin.math.abs(dx) < w * 0.105f
+            val attackRangeOnScreen = dy > -h * 0.13f && dy < h * 0.20f
             if (aligned && attackRangeOnScreen) {
-                progressSampleValid = false
-                stuckSamples = 0
-                avoidTicks = 0
+                resetProgressWatch()
+                avoidPhase = 0
+                avoidPhaseTicks = 0
                 desiredMoveX = 0f
                 desiredMoveY = 0f
                 beginAttackMode()
-                mainHandler.postDelayed({ farmTick() }, 580L)
+                mainHandler.postDelayed({ farmTick() }, 520L)
                 return@captureAndDetectMetin
             }
 
-            // If an avoidance manoeuvre is active, finish a short curved path
-            // around the obstacle before steering directly at the Metin again.
-            if (avoidTicks > 0) {
-                desiredMoveX = avoidDirection * 0.76f
-                desiredMoveY = -0.50f
-                avoidTicks--
-                lastMoveX = desiredMoveX
-                lastMoveY = desiredMoveY
-                lastStatus = "Omijam przeszkodę..."
-                setOverlaySymbol("↪")
-                mainHandler.postDelayed({ farmTick() }, 500L)
-                return@captureAndDetectMetin
-            }
+            val now = System.currentTimeMillis()
+            val commanded = kotlin.math.sqrt(
+                desiredMoveX * desiredMoveX + desiredMoveY * desiredMoveY
+            )
 
-            // Stuck detection: while we are actively walking, the Metin label
-            // should move on screen.  If its position barely changes for several
-            // consecutive OCR frames, assume terrain is blocking the character.
-            if (progressSampleValid) {
-                val pdx = (lastDetectedX - progressSampleX).toFloat()
-                val pdy = (lastDetectedY - progressSampleY).toFloat()
-                val screenShift = kotlin.math.sqrt(pdx * pdx + pdy * pdy)
-                val commanded = kotlin.math.sqrt(desiredMoveX * desiredMoveX + desiredMoveY * desiredMoveY)
-                val minShift = w * 0.0105f
-                if (commanded > 0.28f && screenShift < minShift) {
-                    stuckSamples++
-                } else if (screenShift > minShift * 1.7f) {
-                    stuckSamples = 0
-                    avoidAttempts = 0
+            if (commanded > 0.30f) {
+                if (lastSceneMotion < 4.8f) lowMotionFrames++ else lowMotionFrames = 0
+
+                if (progressAnchorAt == 0L) {
+                    progressAnchorAt = now
+                    progressAnchorX = lastDetectedX
+                    progressAnchorY = lastDetectedY
                 } else {
-                    stuckSamples = (stuckSamples - 1).coerceAtLeast(0)
+                    val pdx = (lastDetectedX - progressAnchorX).toFloat()
+                    val pdy = (lastDetectedY - progressAnchorY).toFloat()
+                    val netTargetShift = kotlin.math.sqrt(pdx * pdx + pdy * pdy)
+                    val watchedFor = now - progressAnchorAt
+                    val weakTargetProgress = netTargetShift < w * 0.040f
+                    val visuallyStationary = lowMotionFrames >= 3
+                    val timedOutWithLittleProgress = watchedFor >= 2600L && weakTargetProgress
+
+                    if ((watchedFor >= 1500L && visuallyStationary && weakTargetProgress) ||
+                        timedOutWithLittleProgress) {
+                        beginAvoidance(dx)
+                        applyAvoidanceStep()
+                        mainHandler.postDelayed({ farmTick() }, 470L)
+                        return@captureAndDetectMetin
+                    }
+
+                    if (netTargetShift >= w * 0.065f || watchedFor >= 3000L) {
+                        progressAnchorAt = now
+                        progressAnchorX = lastDetectedX
+                        progressAnchorY = lastDetectedY
+                        lowMotionFrames = 0
+                        if (netTargetShift >= w * 0.065f) avoidAttempts = 0
+                    }
                 }
-            }
-            progressSampleX = lastDetectedX
-            progressSampleY = lastDetectedY
-            progressSampleValid = true
-
-            if (stuckSamples >= 4) {
-                stuckSamples = 0
-                avoidAttempts++
-                // Alternate sides on consecutive blocks.  Prefer the side that
-                // initially points away from the target's horizontal offset.
-                avoidDirection = if (avoidAttempts % 2 == 1) {
-                    if (dx >= 0f) -1f else 1f
-                } else {
-                    -avoidDirection
-                }
-                avoidTicks = if (avoidAttempts >= 3) 6 else 4
-                desiredMoveX = avoidDirection * 0.80f
-                desiredMoveY = -0.48f
-                lastMoveX = desiredMoveX
-                lastMoveY = desiredMoveY
-                lastStatus = "Wykryto utknięcie — obchodzę przeszkodę"
-                setOverlaySymbol("↪")
-                mainHandler.postDelayed({ farmTick() }, 480L)
-                return@captureAndDetectMetin
+            } else {
+                resetProgressWatch()
             }
 
-            val targetX = (dx / (w * 0.30f)).coerceIn(-0.86f, 0.86f)
-            val targetY = (dy / (h * 0.31f)).coerceIn(-0.90f, 0.90f)
-
-            // Smooth steering: keep inertia from the previous direction so OCR
-            // jitter cannot create left-right or start-stop movement.
-            val moveX = (lastMoveX * 0.66f + targetX * 0.34f).coerceIn(-0.86f, 0.86f)
-            val moveY = (lastMoveY * 0.66f + targetY * 0.34f).coerceIn(-0.90f, 0.90f)
+            val targetX = (dx / (w * 0.29f)).coerceIn(-0.88f, 0.88f)
+            val targetY = (dy / (h * 0.30f)).coerceIn(-0.92f, 0.92f)
+            val moveX = (lastMoveX * 0.72f + targetX * 0.28f).coerceIn(-0.88f, 0.88f)
+            val moveY = (lastMoveY * 0.72f + targetY * 0.28f).coerceIn(-0.92f, 0.92f)
             lastMoveX = moveX
             lastMoveY = moveY
             desiredMoveX = moveX
             desiredMoveY = moveY
 
-            lastStatus = "Podejście: X=${dx.toInt()} Y=${dy.toInt()}"
+            lastStatus = "Podejście płynne: X=${dx.toInt()} Y=${dy.toInt()}"
             mainHandler.postDelayed({ farmTick() }, 430L)
         }
     }
@@ -958,9 +1038,11 @@ class BotAccessibilityService : AccessibilityService() {
         attackMode = false
         attackMisses = 0
         activeJoystickStroke = null
-        progressSampleValid = false
-        stuckSamples = 0
-        avoidTicks = 0
+        resetProgressWatch()
+        previousSceneSample = null
+        lastSceneMotion = 100f
+        avoidPhase = 0
+        avoidPhaseTicks = 0
         avoidDirection = 1f
         avoidAttempts = 0
         running = true
@@ -979,9 +1061,10 @@ class BotAccessibilityService : AccessibilityService() {
         lastMoveY = 0f
         desiredMoveX = 0f
         desiredMoveY = 0f
-        progressSampleValid = false
-        stuckSamples = 0
-        avoidTicks = 0
+        resetProgressWatch()
+        previousSceneSample = null
+        avoidPhase = 0
+        avoidPhaseTicks = 0
         avoidAttempts = 0
         mainHandler.removeCallbacks(attackLoop)
         mainHandler.removeCallbacks(movementLoop)

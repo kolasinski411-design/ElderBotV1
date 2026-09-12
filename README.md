@@ -1,17 +1,5 @@
-# ElderBot V0.9 FARM LOOP
+# ElderBot V0.10 FARM LOOP
 
-Android Accessibility + on-screen OCR prototype for ElderMT2.
+OCR Metina → płynne podejście → mocniejsze wykrywanie utknięcia (ruch sceny + ruch celu) → 3-etapowe obejście przeszkody → ponowne namierzenie → atak → loot → następny cel.
 
-Core loop in this build:
-- search visually for Metin labels,
-- continuous smoothed joystick steering,
-- detect lack of progress and attempt left/right obstacle bypass,
-- reacquire the Metin after the bypass,
-- select and repeatedly attack the Metin,
-- detect disappearance, then OCR/tap nearby loot labels,
-- return to searching for the next Metin.
-
-Notes:
-- Obstacle avoidance is reactive. It does not read game map/navigation data.
-- Exact attack/pickup button coordinates remain screen-layout dependent.
-- No anti-cheat bypass, injection, wallhack, or game-file modification is used.
+V0.10: po wykryciu blokady bot cofa, odchodzi zdecydowanie bokiem, a potem wraca łukiem do celu. Przy kolejnej blokadzie zmienia stronę obejścia.

@@ -16,7 +16,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
 
         val title = TextView(this).apply {
-            text = "ElderBot V0.8"
+            text = "ElderBot V0.10"
             textSize = 28f
             gravity = Gravity.CENTER
             setPadding(16, 32, 16, 12)
