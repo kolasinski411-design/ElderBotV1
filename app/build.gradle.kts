@@ -11,8 +11,8 @@ android {
         applicationId = "pl.elderbot.v1"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.19.1"
+        versionCode = 21
+        versionName = "0.19.2"
     }
 
     compileOptions {

@@ -1,18 +1,12 @@
-# ElderBot V0.19 MULTI TARGET
+# ElderBot V0.19.2 AUTO EXP TARGET FIX
 
 Zmiany:
-- osobny moduł Bossy / Minibossy M1 + M2,
-- priorytet celów: BOSS/MINIBOSS > METIN > EXP,
-- M1: Lykos, Scrofa, Bera, Tigris, Cung-Mok, Jug-Hyul, Mi-Jung, Se-Rang, Jin-Hee,
-- M2: Mahon, Bo, Goo-Pae, Chuong, Bestialski Kapitan,
-- START/STOP nadal stale na górze,
-- ustawienia nadal przewijane pionowo,
-- zachowane Pickup przez ikonę ręki, Auto Skills, Auto Potions, Auto Revive i Safe Approach.
+- Auto EXP odrzuca czerwony tekst czatu i bierze cele tylko z obszaru gry,
+- przy wielu mobach wybiera najbliższy widoczny cel względem postaci,
+- widoczny mob EXP jest aktywnie śledzony zamiast porzucany na rzecz patrolu,
+- atak EXP uruchamia się dopiero po znacznie bliższym podejściu do celu,
+- po utracie/zabiciu celu bot ponownie skanuje ekran i wybiera następnego,
+- priorytet pozostaje: BOSS/MINIBOSS > METIN > EXP,
+- zachowane UI V0.19.1, Pickup przez ikonę ręki, Auto Skills, Potions, Revive i Safe Approach.
 
-Sterowanie wyłącznie przez ekran/OCR/Accessibility.
-
-
-## V0.19.1 BUILD FIX
-- poprawiony blad kompilacji ScrollView/LayoutParams w panelu overlay,
-- zachowane START/STOP u gory i przewijanie ustawien,
-- zachowane Multi Target, Pickup, Auto Skills, Auto Potions i Auto Revive.
+Sterowanie pozostaje ekran/OCR/Android Accessibility; bez modyfikacji klienta gry.

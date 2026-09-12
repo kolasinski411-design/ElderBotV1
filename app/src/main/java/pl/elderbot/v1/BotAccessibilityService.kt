@@ -549,7 +549,10 @@ class BotAccessibilityService : AccessibilityService() {
                         val isBoss = bossNames.any { compact.contains(it) }
                         val uiNoise = normalized.contains("yang") || normalized.contains("poziom") ||
                             normalized.contains("elderbot") || normalized.contains("szukam") || normalized.length < 3
-                        if (!(isBoss && bossMode) && !isMetin && !(expMode && !uiNoise && redScore > 18)) continue
+                        // EXP targets must be actual red world labels in the upper gameplay area.
+                        // This deliberately rejects chat text near the bottom of the screen.
+                        val isExpCandidate = expMode && !uiNoise && redScore > 18 && box.centerY() < (h * 0.62f)
+                        if (!(isBoss && bossMode) && !isMetin && !isExpCandidate) continue
 
                         val labelWidth = box.width().coerceAtLeast(1)
                         val labelHeight = box.height().coerceAtLeast(1)
@@ -559,7 +562,15 @@ class BotAccessibilityService : AccessibilityService() {
                             isMetin -> 10000
                             else -> 0
                         }
-                        val score = priority + redScore * 4 + sizeScore
+                        // For ordinary EXP mobs choose the closest visible label to the player,
+                        // not the reddest/largest OCR line. Boss and Metin priorities stay above EXP.
+                        val playerX = w * 0.50f
+                        val playerY = h * 0.48f
+                        val ddx = box.centerX() - playerX
+                        val ddy = (box.bottom + 65) - playerY
+                        val screenDistance = kotlin.math.sqrt(ddx * ddx + ddy * ddy)
+                        val expDistanceScore = if (priority == 0) (5000f - screenDistance).toInt() else 0
+                        val score = priority + expDistanceScore + redScore * 2 + sizeScore
 
                         if (score > bestScore) {
                             bestScore = score
@@ -1510,8 +1521,11 @@ class BotAccessibilityService : AccessibilityService() {
             // We stay on the map route until the Metin enters a conservative capture corridor.
             // This prevents a Metin visible behind a hill/river/rock from pulling the character
             // straight into collision geometry.
+            val isExpTarget = lastTargetKind == "EXP"
             val inCaptureCorridor = kotlin.math.abs(dx) < w * 0.24f && dy > -h * 0.20f && dy < h * 0.28f
-            if (!inCaptureCorridor) {
+            // Metins/bosses keep the conservative route approach. EXP is intentionally local:
+            // when a red mob label is visible, walk to that mob instead of continuing patrol.
+            if (!isExpTarget && !inCaptureCorridor) {
                 resetProgressWatch()
                 applyPatrolRoute()
                 lastStatus = "${currentMapLabel}: $lastTargetKind widoczny • trzymam bezpieczną trasę"
@@ -1522,8 +1536,14 @@ class BotAccessibilityService : AccessibilityService() {
 
             setOverlaySymbol("■")
 
-            val aligned = kotlin.math.abs(dx) < w * 0.105f
-            val attackRangeOnScreen = dy > -h * 0.13f && dy < h * 0.20f
+            // EXP needs a tighter attack gate so the sword is not pressed while the mob is
+            // merely visible in the distance. Metins/bosses keep the previous capture range.
+            val aligned = kotlin.math.abs(dx) < w * (if (isExpTarget) 0.075f else 0.105f)
+            val attackRangeOnScreen = if (isExpTarget) {
+                dy > -h * 0.075f && dy < h * 0.12f
+            } else {
+                dy > -h * 0.13f && dy < h * 0.20f
+            }
             if (aligned && attackRangeOnScreen) {
                 resetProgressWatch()
                 avoidPhase = 0
@@ -1595,7 +1615,7 @@ class BotAccessibilityService : AccessibilityService() {
                 steeringUpdatedAt = now
             }
 
-            lastStatus = "Podejście po trasie: X=${dx.toInt()} Y=${dy.toInt()}"
+            lastStatus = if (isExpTarget) "Auto EXP: podchodzę do najbliższego moba" else "Podejście po trasie: X=${dx.toInt()} Y=${dy.toInt()}"
             mainHandler.postDelayed({ farmTick() }, 520L)
         }
     }
