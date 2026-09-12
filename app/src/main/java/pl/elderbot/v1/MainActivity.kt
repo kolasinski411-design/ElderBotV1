@@ -58,7 +58,7 @@ class MainActivity : Activity() {
             setPadding(18, 24, 18, 2)
         }
         val sub = TextView(this).apply {
-            text = "V0.12 • panel w stylu bota desktopowego • działa nad grą"
+            text = "V0.14 • MULTI-MAP NAV • pamięć przeszkód i trasy per mapa"
             textSize = 12f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER

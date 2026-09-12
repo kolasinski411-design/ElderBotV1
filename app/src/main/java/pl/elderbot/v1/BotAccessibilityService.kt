@@ -87,6 +87,13 @@ class BotAccessibilityService : AccessibilityService() {
     private var lastMpPotionAt = 0L
     private var lastReviveScanAt = 0L
 
+    // Multi-map navigation state. We keep map-specific steering memory outside the game client.
+    @Volatile private var currentMapId = "unknown"
+    @Volatile private var currentMapLabel = "Nieznana mapa"
+    private var lastMapSeenAt = 0L
+    private var currentSceneFingerprint = "scene0"
+    private var lastSafeHeadingBucket = -1
+
     private fun prefs() = getSharedPreferences("elderbot_settings", MODE_PRIVATE)
     private fun enabled(key: String, defaultValue: Boolean = true): Boolean =
         prefs().getBoolean(key, defaultValue)
@@ -491,11 +498,8 @@ class BotAccessibilityService : AccessibilityService() {
                 for (block in text.textBlocks) {
                     for (line in block.lines) {
                         val raw = line.text.trim()
-                        val normalized = raw.lowercase(Locale.getDefault())
-                            .replace("ę", "e").replace("ą", "a")
-                            .replace("ł", "l").replace("ś", "s")
-                            .replace("ć", "c").replace("ń", "n")
-                            .replace("ó", "o").replace("ź", "z").replace("ż", "z")
+                        val normalized = normalizeGameText(raw)
+                        updateMapFromText(normalized)
                         val box = line.boundingBox ?: continue
                         if (!normalized.contains("metin") || !box.intersect(gameplay)) continue
 
@@ -558,6 +562,18 @@ class BotAccessibilityService : AccessibilityService() {
 
         val previous = previousSceneSample
         previousSceneSample = sample
+        // Coarse terrain fingerprint: four luminance bands + overall contrast. It is intentionally
+        // low resolution so nearby frames map to the same local obstacle memory.
+        val band = IntArray(4)
+        val perBand = sample.size / 4
+        for (b in 0 until 4) {
+            var sum = 0
+            val from = b * perBand
+            val to = if (b == 3) sample.size else (b + 1) * perBand
+            for (q in from until to) sum += sample[q]
+            band[b] = ((sum / (to - from).coerceAtLeast(1)) / 24).coerceIn(0, 10)
+        }
+        currentSceneFingerprint = "${band[0]}${band[1]}${band[2]}${band[3]}"
         if (previous == null || previous.size != sample.size) return 100f
 
         var diff = 0L
@@ -1177,6 +1193,94 @@ class BotAccessibilityService : AccessibilityService() {
         } catch (_: Throwable) { }
     }
 
+    private data class MapRouteProfile(
+        val id: String,
+        val label: String,
+        val headings: Array<Pair<Float, Float>>
+    )
+
+    private fun normalizeGameText(raw: String): String = raw.lowercase(Locale.getDefault())
+        .replace("ę", "e").replace("ą", "a")
+        .replace("ł", "l").replace("ś", "s")
+        .replace("ć", "c").replace("ń", "n")
+        .replace("ó", "o").replace("ź", "z").replace("ż", "z")
+
+    private fun updateMapFromText(text: String) {
+        val n = normalizeGameText(text)
+        val match = when {
+            n.contains("seungryong") || n.contains("dolina") -> "seungryong" to "Dolina Seungryong"
+            n.contains("yongbi") || n.contains("pustynia") -> "yongbi" to "Pustynia Yongbi"
+            n.contains("sohan") || n.contains("gora sohan") -> "sohan" to "Góra Sohan"
+            n.contains("piekielna") || n.contains("ognista ziemia") -> "fireland" to "Piekielna Ziemia"
+            n.contains("czerwony las") -> "red_forest" to "Czerwony Las"
+            n.contains("las duchow") -> "ghost_forest" to "Las Duchów"
+            n.contains("wezowe pole") || n.contains("wezowe") -> "snakefield" to "Wężowe Pole"
+            n.contains("swiatynia hwang") || n.contains("hwang") -> "hwang" to "Świątynia Hwang"
+            n.contains("bakra") || n.contains("bokjung") || n.contains("jayang") -> "m2" to "Miasto drugie"
+            n.contains("yongan") || n.contains("joan") || n.contains("pyungmoo") -> "m1" to "Miasto pierwsze"
+            else -> null
+        }
+        if (match != null) {
+            currentMapId = match.first
+            currentMapLabel = match.second
+            lastMapSeenAt = System.currentTimeMillis()
+            prefs().edit().putString("last_map_id", currentMapId).putString("last_map_label", currentMapLabel).apply()
+        }
+    }
+
+    private fun currentRouteProfile(): MapRouteProfile {
+        fun a(vararg p: Pair<Float, Float>) = arrayOf(*p)
+        return when (currentMapId) {
+            "seungryong" -> MapRouteProfile("seungryong", "Dolina Seungryong", a(0f to -0.72f, 0.34f to -0.62f, 0.58f to -0.38f, -0.22f to -0.70f, -0.52f to -0.42f))
+            "yongbi" -> MapRouteProfile("yongbi", "Pustynia Yongbi", a(0f to -0.78f, 0.44f to -0.55f, -0.44f to -0.55f, 0.66f to -0.28f, -0.66f to -0.28f))
+            "sohan" -> MapRouteProfile("sohan", "Góra Sohan", a(0f to -0.62f, 0.30f to -0.58f, -0.30f to -0.58f, 0.60f to -0.24f, -0.60f to -0.24f))
+            "fireland" -> MapRouteProfile("fireland", "Piekielna Ziemia", a(0f to -0.66f, 0.40f to -0.52f, -0.40f to -0.52f, 0.62f to -0.22f, -0.62f to -0.22f))
+            "ghost_forest", "red_forest" -> MapRouteProfile(currentMapId, currentMapLabel, a(0f to -0.58f, 0.28f to -0.55f, -0.28f to -0.55f, 0.54f to -0.24f, -0.54f to -0.24f))
+            "snakefield", "hwang" -> MapRouteProfile(currentMapId, currentMapLabel, a(0f to -0.64f, 0.34f to -0.54f, -0.34f to -0.54f, 0.58f to -0.20f, -0.58f to -0.20f))
+            "m1", "m2" -> MapRouteProfile(currentMapId, currentMapLabel, a(0f to -0.70f, 0.36f to -0.58f, -0.36f to -0.58f, 0.58f to -0.30f, -0.58f to -0.30f))
+            else -> MapRouteProfile("unknown", "Nieznana mapa", a(0f to -0.68f, 0.30f to -0.60f, -0.30f to -0.60f, 0.52f to -0.36f, -0.52f to -0.36f))
+        }
+    }
+
+    private fun headingBucket(x: Float, y: Float): Int {
+        val angle = Math.toDegrees(kotlin.math.atan2(x.toDouble(), (-y).toDouble()))
+        val normalized = ((angle + 360.0) % 360.0)
+        return ((normalized + 22.5) / 45.0).toInt() % 8
+    }
+
+    private fun blockKey(local: Boolean, bucket: Int): String = if (local) {
+        "nav_block_${currentMapId}_${currentSceneFingerprint}_$bucket"
+    } else {
+        "nav_block_${currentMapId}_global_$bucket"
+    }
+
+    private fun blockedScore(bucket: Int): Int {
+        val p = prefs()
+        return p.getInt(blockKey(false, bucket), 0) + p.getInt(blockKey(true, bucket), 0) * 2
+    }
+
+    private fun rememberBlockedDirection() {
+        val bucket = headingBucket(desiredMoveX, desiredMoveY)
+        val p = prefs()
+        val gk = blockKey(false, bucket)
+        val lk = blockKey(true, bucket)
+        val global = (p.getInt(gk, 0) + 1).coerceAtMost(8)
+        val local = (p.getInt(lk, 0) + 2).coerceAtMost(12)
+        p.edit().putInt(gk, global).putInt(lk, local).apply()
+    }
+
+    private fun rewardCurrentDirection() {
+        val bucket = headingBucket(desiredMoveX, desiredMoveY)
+        if (bucket == lastSafeHeadingBucket) return
+        lastSafeHeadingBucket = bucket
+        val p = prefs()
+        val gk = blockKey(false, bucket)
+        val lk = blockKey(true, bucket)
+        val global = (p.getInt(gk, 0) - 1).coerceAtLeast(0)
+        val local = (p.getInt(lk, 0) - 1).coerceAtLeast(0)
+        p.edit().putInt(gk, global).putInt(lk, local).apply()
+    }
+
     private fun resetProgressWatch() {
         progressAnchorAt = 0L
         progressAnchorX = 0
@@ -1211,27 +1315,30 @@ class BotAccessibilityService : AccessibilityService() {
             patrolStep++
             patrolStepUntil = now + 6500L
         }
-        // Long, smooth patrol legs.  These are virtual route headings; they keep
-        // movement stable until a target is found or an obstacle is detected.
-        val route = arrayOf(
-            0.00f to -0.72f,
-            0.26f to -0.66f,
-            0.48f to -0.48f,
-            0.18f to -0.70f,
-            -0.18f to -0.70f,
-            -0.48f to -0.48f,
-            -0.26f to -0.66f
-        )
-        val p = route[patrolStep % route.size]
-        desiredMoveX = (lastMoveX * 0.84f + p.first * 0.16f).coerceIn(-0.86f, 0.86f)
-        desiredMoveY = (lastMoveY * 0.84f + p.second * 0.16f).coerceIn(-0.90f, 0.90f)
+        val profile = currentRouteProfile()
+        // Pick a route leg that has worked on this map/local terrain before. A blocked
+        // direction gets a persistent penalty, so the bot stops repeating the same mistake.
+        var best = profile.headings[patrolStep % profile.headings.size]
+        var bestScore = Int.MAX_VALUE
+        for (offset in profile.headings.indices) {
+            val candidate = profile.headings[(patrolStep + offset) % profile.headings.size]
+            val bucket = headingBucket(candidate.first, candidate.second)
+            val score = blockedScore(bucket) + offset
+            if (score < bestScore) {
+                bestScore = score
+                best = candidate
+            }
+        }
+        desiredMoveX = (lastMoveX * 0.72f + best.first * 0.28f).coerceIn(-0.86f, 0.86f)
+        desiredMoveY = (lastMoveY * 0.72f + best.second * 0.28f).coerceIn(-0.90f, 0.90f)
         lastMoveX = desiredMoveX
         lastMoveY = desiredMoveY
-        lastStatus = "Trasa farmy — szukam celu"
+        lastStatus = "${profile.label}: bezpieczna trasa • pamięć przeszkód=$bestScore"
         setOverlaySymbol("⌕")
     }
 
     private fun beginAvoidance(dx: Float) {
+        rememberBlockedDirection()
         avoidAttempts++
         avoidDirection = if (avoidAttempts % 2 == 1) {
             if (dx >= 0f) -1f else 1f
@@ -1395,6 +1502,7 @@ class BotAccessibilityService : AccessibilityService() {
                         progressAnchorX = lastDetectedX
                         progressAnchorY = lastDetectedY
                         avoidAttempts = 0
+                        rewardCurrentDirection()
                     }
 
                     val noRealProgressFor = now - lastMeaningfulProgressAt
@@ -1469,6 +1577,9 @@ class BotAccessibilityService : AccessibilityService() {
         lastHpPotionAt = 0L
         lastMpPotionAt = 0L
         lastReviveScanAt = 0L
+        currentMapId = prefs().getString("last_map_id", currentMapId) ?: currentMapId
+        currentMapLabel = prefs().getString("last_map_label", currentMapLabel) ?: currentMapLabel
+        lastSafeHeadingBucket = -1
         running = true
         lastStatus = "ElderBot: SZUKAM METINA..."
         setOverlaySymbol("■")
