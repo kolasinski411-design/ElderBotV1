@@ -71,6 +71,15 @@ class BotAccessibilityService : AccessibilityService() {
     private var avoidPhaseTicks = 0
     private var avoidDirection = 1f
     private var avoidAttempts = 0
+
+    // Route-style navigation inspired by waypoint farming: when there is no reachable
+    // target, keep a stable heading for several seconds instead of twitching every OCR scan.
+    private var patrolStep = 0
+    private var patrolStepUntil = 0L
+    private var ignoredTargetX = 0
+    private var ignoredTargetY = 0
+    private var ignoreTargetUntil = 0L
+    private var steeringUpdatedAt = 0L
     private var bestApproachError = Float.MAX_VALUE
     private var lastMeaningfulProgressAt = 0L
     private val skillLastTapAt = LongArray(3)
@@ -1177,6 +1186,51 @@ class BotAccessibilityService : AccessibilityService() {
         lastMeaningfulProgressAt = 0L
     }
 
+    private fun isIgnoredTarget(w: Float, h: Float): Boolean {
+        if (System.currentTimeMillis() >= ignoreTargetUntil) return false
+        val dx = kotlin.math.abs(lastDetectedX - ignoredTargetX)
+        val dy = kotlin.math.abs(lastDetectedY - ignoredTargetY)
+        return dx < w * 0.16f && dy < h * 0.22f
+    }
+
+    private fun ignoreCurrentTargetAndResumeRoute() {
+        ignoredTargetX = lastDetectedX
+        ignoredTargetY = lastDetectedY
+        ignoreTargetUntil = System.currentTimeMillis() + 11000L
+        avoidPhase = 0
+        avoidPhaseTicks = 0
+        avoidAttempts = 0
+        resetProgressWatch()
+        patrolStepUntil = 0L
+        lastStatus = "Cel niedostępny — wracam na trasę"
+        setOverlaySymbol("↻")
+    }
+
+    private fun applyPatrolRoute(now: Long = System.currentTimeMillis()) {
+        if (now >= patrolStepUntil) {
+            patrolStep++
+            patrolStepUntil = now + 6500L
+        }
+        // Long, smooth patrol legs.  These are virtual route headings; they keep
+        // movement stable until a target is found or an obstacle is detected.
+        val route = arrayOf(
+            0.00f to -0.72f,
+            0.26f to -0.66f,
+            0.48f to -0.48f,
+            0.18f to -0.70f,
+            -0.18f to -0.70f,
+            -0.48f to -0.48f,
+            -0.26f to -0.66f
+        )
+        val p = route[patrolStep % route.size]
+        desiredMoveX = (lastMoveX * 0.84f + p.first * 0.16f).coerceIn(-0.86f, 0.86f)
+        desiredMoveY = (lastMoveY * 0.84f + p.second * 0.16f).coerceIn(-0.90f, 0.90f)
+        lastMoveX = desiredMoveX
+        lastMoveY = desiredMoveY
+        lastStatus = "Trasa farmy — szukam celu"
+        setOverlaySymbol("⌕")
+    }
+
     private fun beginAvoidance(dx: Float) {
         avoidAttempts++
         avoidDirection = if (avoidAttempts % 2 == 1) {
@@ -1275,30 +1329,27 @@ class BotAccessibilityService : AccessibilityService() {
                     return@captureAndDetectMetin
                 }
 
-                lastStatus = "Szukam Metina..."
+                lastStatus = "Szukam Metina na trasie..."
                 if (missCount >= 2) {
-                    val pattern = arrayOf(
-                        0.00f to -0.60f,
-                        0.34f to -0.56f,
-                        0.00f to -0.60f,
-                        -0.34f to -0.56f
-                    )
-                    val p = pattern[searchStep % pattern.size]
-                    searchStep++
-                    desiredMoveX = p.first
-                    desiredMoveY = p.second
-                    setOverlaySymbol("⌕")
+                    applyPatrolRoute()
                 } else {
-                    desiredMoveX = 0f
-                    desiredMoveY = 0f
+                    // Do not hard-stop after a single missed OCR frame.
+                    desiredMoveX = lastMoveX * 0.92f
+                    desiredMoveY = lastMoveY * 0.92f
                 }
-                mainHandler.postDelayed({ farmTick() }, 520L)
+                mainHandler.postDelayed({ farmTick() }, 560L)
                 return@captureAndDetectMetin
             }
 
             missCount = 0
             val dx = lastDetectedX - w * 0.50f
             val dy = lastDetectedY - h * 0.48f
+
+            if (isIgnoredTarget(w, h)) {
+                applyPatrolRoute()
+                mainHandler.postDelayed({ farmTick() }, 560L)
+                return@captureAndDetectMetin
+            }
 
             if (applyAvoidanceStep()) {
                 mainHandler.postDelayed({ farmTick() }, 470L)
@@ -1348,10 +1399,16 @@ class BotAccessibilityService : AccessibilityService() {
 
                     val noRealProgressFor = now - lastMeaningfulProgressAt
                     val hardTimeout = now - progressAnchorAt
-                    if (noRealProgressFor >= 2100L || hardTimeout >= 4200L) {
-                        beginAvoidance(dx)
-                        applyAvoidanceStep()
-                        mainHandler.postDelayed({ farmTick() }, 470L)
+                    if (noRealProgressFor >= 2200L || hardTimeout >= 4600L) {
+                        if (avoidAttempts >= 3) {
+                            ignoreCurrentTargetAndResumeRoute()
+                            applyPatrolRoute()
+                            mainHandler.postDelayed({ farmTick() }, 560L)
+                        } else {
+                            beginAvoidance(dx)
+                            applyAvoidanceStep()
+                            mainHandler.postDelayed({ farmTick() }, 500L)
+                        }
                         return@captureAndDetectMetin
                     }
                 }
@@ -1359,17 +1416,22 @@ class BotAccessibilityService : AccessibilityService() {
                 resetProgressWatch()
             }
 
-            val targetX = (dx / (w * 0.29f)).coerceIn(-0.88f, 0.88f)
-            val targetY = (dy / (h * 0.30f)).coerceIn(-0.92f, 0.92f)
-            val moveX = (lastMoveX * 0.72f + targetX * 0.28f).coerceIn(-0.88f, 0.88f)
-            val moveY = (lastMoveY * 0.72f + targetY * 0.28f).coerceIn(-0.92f, 0.92f)
-            lastMoveX = moveX
-            lastMoveY = moveY
-            desiredMoveX = moveX
-            desiredMoveY = moveY
+            val targetX = (dx / (w * 0.30f)).coerceIn(-0.86f, 0.86f)
+            val targetY = (dy / (h * 0.31f)).coerceIn(-0.90f, 0.90f)
+            // Steering is intentionally low-pass filtered and not rewritten on every OCR frame.
+            // This removes the left-right twitching that made movement look robotic.
+            if (now - steeringUpdatedAt >= 850L) {
+                val moveX = (lastMoveX * 0.84f + targetX * 0.16f).coerceIn(-0.86f, 0.86f)
+                val moveY = (lastMoveY * 0.84f + targetY * 0.16f).coerceIn(-0.90f, 0.90f)
+                lastMoveX = if (kotlin.math.abs(moveX) < 0.035f) 0f else moveX
+                lastMoveY = if (kotlin.math.abs(moveY) < 0.035f) 0f else moveY
+                desiredMoveX = lastMoveX
+                desiredMoveY = lastMoveY
+                steeringUpdatedAt = now
+            }
 
-            lastStatus = "Podejście płynne: X=${dx.toInt()} Y=${dy.toInt()}"
-            mainHandler.postDelayed({ farmTick() }, 430L)
+            lastStatus = "Podejście po trasie: X=${dx.toInt()} Y=${dy.toInt()}"
+            mainHandler.postDelayed({ farmTick() }, 520L)
         }
     }
 
@@ -1395,6 +1457,12 @@ class BotAccessibilityService : AccessibilityService() {
         avoidPhaseTicks = 0
         avoidDirection = 1f
         avoidAttempts = 0
+        patrolStep = 0
+        patrolStepUntil = 0L
+        ignoredTargetX = 0
+        ignoredTargetY = 0
+        ignoreTargetUntil = 0L
+        steeringUpdatedAt = 0L
         bestApproachError = Float.MAX_VALUE
         lastMeaningfulProgressAt = 0L
         skillLastTapAt.fill(0L)
@@ -1422,6 +1490,9 @@ class BotAccessibilityService : AccessibilityService() {
         avoidPhase = 0
         avoidPhaseTicks = 0
         avoidAttempts = 0
+        patrolStepUntil = 0L
+        ignoreTargetUntil = 0L
+        steeringUpdatedAt = 0L
         mainHandler.removeCallbacks(attackLoop)
         mainHandler.removeCallbacks(movementLoop)
         mainHandler.removeCallbacksAndMessages(null)

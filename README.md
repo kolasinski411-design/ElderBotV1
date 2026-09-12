@@ -1,9 +1,11 @@
-# ElderBot Mobile V0.12
+# ElderBot V0.13 ROUTE NAV
 
-Etap finalny aktualnego rdzenia mobilnego: panel overlay dostępny nad grą, Farmbot, Pickup, Auto Skills, Auto Potions, Auto Revive oraz reaktywny anti-stuck.
+Zmiany nawigacji:
+- stabilne odcinki trasy zamiast krótkich zygzakow,
+- mocniejsze wygładzenie sterowania,
+- anti-stuck z obejściem,
+- po kilku nieudanych obejściach cel jest tymczasowo pomijany,
+- bot wraca do trasy zamiast wciskac sie w te sama skale,
+- zachowane Farmbot / Pickup / Auto Skills / Auto Potions / Auto Revive / overlay.
 
-Wszystkie akcje są realizowane przez analizę obrazu/OCR i Android Accessibility. Aplikacja nie modyfikuje klienta gry.
-
-Panel overlay: pływający przycisk `EB` -> panel modułów -> START/STOP bez wychodzenia z gry.
-
-Auto Mining i Auto Fishing są przewidziane jako kolejne moduły, ale nie są aktywne w V0.12.
+Nie ingeruje w klienta gry; sterowanie odbywa sie przez ekran/OCR/Accessibility.
