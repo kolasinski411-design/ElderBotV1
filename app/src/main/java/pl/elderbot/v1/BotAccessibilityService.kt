@@ -597,46 +597,52 @@ private fun farmTick() {
 
         if (!found) {
             lastStatus = "Szukam Metina..."
-        } else {
-            val metrics = resources.displayMetrics
-            val w = metrics.widthPixels
-            val h = metrics.heightPixels
-
-            val centerX = w / 2
-            val centerY = (h * 0.50f).toInt()
-
-            val dx = lastDetectedX - centerX
-            val dy = lastDetectedY - centerY
-
-            val toleranceX = (w * 0.10f).toInt()
-            val toleranceY = (h * 0.10f).toInt()
-
-            if (kotlin.math.abs(dx) <= toleranceX &&
-                kotlin.math.abs(dy) <= toleranceY) {
-
-                lastStatus = "Metin na celu — ATAK"
-                tapAttackButton()
-            } else {
-                val dirX = when {
-                    dx > toleranceX -> 1f
-                    dx < -toleranceX -> -1f
-                    else -> 0f
-                }
-
-                val dirY = when {
-                    dy > toleranceY -> 1f
-                    dy < -toleranceY -> -1f
-                    else -> 0f
-                }
-
-                moveJoystick(dirX, dirY, 450L)
-                lastStatus = "Podejście do Metina: X=$dx Y=$dy"
-            }
+            mainHandler.postDelayed({ farmTick() }, 700L)
+            return@captureAndDetectMetin
         }
 
-        mainHandler.postDelayed({
-            farmTick()
-        }, 650L)
+        val metrics = resources.displayMetrics
+        val w = metrics.widthPixels.toFloat()
+        val h = metrics.heightPixels.toFloat()
+
+        val centerX = w * 0.50f
+        val centerY = h * 0.48f
+
+        val dx = lastDetectedX - centerX
+        val dy = lastDetectedY - centerY
+
+        val normX = (dx / (w * 0.38f)).coerceIn(-1f, 1f)
+        val normY = (dy / (h * 0.34f)).coerceIn(-1f, 1f)
+
+        val distance = kotlin.math.sqrt(dx * dx + dy * dy)
+
+        val attackDistance = w * 0.10f
+        val slowDistance = w * 0.24f
+
+        if (distance <= attackDistance) {
+            lastStatus = "Metin blisko — ATAK"
+            tapAttackButton()
+            mainHandler.postDelayed({ farmTick() }, 500L)
+            return@captureAndDetectMetin
+        }
+
+        val strength =
+            if (distance < slowDistance) 0.45f
+            else 0.85f
+
+        val moveX = normX * strength
+        val moveY = normY * strength
+
+        val duration =
+            if (distance < slowDistance) 260L
+            else 430L
+
+        moveJoystick(moveX, moveY, duration)
+
+        lastStatus =
+            "Podejście płynne: X=${dx.toInt()} Y=${dy.toInt()} D=${distance.toInt()}"
+
+        mainHandler.postDelayed({ farmTick() }, 420L)
     }
 }
 
