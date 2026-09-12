@@ -58,7 +58,7 @@ class MainActivity : Activity() {
             setPadding(18, 24, 18, 2)
         }
         val sub = TextView(this).apply {
-            text = "V0.14 • MULTI-MAP NAV • pamięć przeszkód i trasy per mapa"
+            text = "V0.17 • PICKUP RĘKĄ • AUTO EXP • KALIBRACJA SKILLI"
             textSize = 12f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
@@ -70,14 +70,19 @@ class MainActivity : Activity() {
             background = panelBg()
             setPadding(8, 4, 8, 10)
             addView(section("AUTOMATYZACJA"))
-            addView(option("Farmbot", "farmbot"))
+            addView(option("Farmbot • Metiny", "farmbot"))
+            addView(option("Auto EXP • Moby", "auto_exp", false))
             addView(option("Pickup", "pickup"))
             addView(option("Auto Skills", "auto_skills"))
             addView(option("Auto Potions HP / MP", "auto_potions"))
             addView(option("Auto Revive", "auto_revive"))
+            addView(Button(this@MainActivity).apply {
+                text = "KALIBRUJ 3 SKILLE W GRZE"
+                setOnClickListener { BotAccessibilityService.instance?.startSkillCalibration() }
+            })
             addView(section("CELE"))
             addView(TextView(this@MainActivity).apply {
-                text = "Metiny: aktywne\nBossy / Moby: przygotowane do kolejnego etapu"
+                text = "Metiny: aktywne\nAuto EXP: moby z czerwonymi nazwami"
                 textSize = 14f; setTextColor(Color.LTGRAY); setPadding(18, 4, 18, 10)
             })
             addView(section("MODUŁY ROZSZERZEŃ"))

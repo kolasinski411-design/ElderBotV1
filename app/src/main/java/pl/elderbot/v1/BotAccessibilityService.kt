@@ -83,9 +83,11 @@ class BotAccessibilityService : AccessibilityService() {
     private var bestApproachError = Float.MAX_VALUE
     private var lastMeaningfulProgressAt = 0L
     private val skillLastTapAt = LongArray(3)
+    private var skillCalibrationOverlay: View? = null
     private var lastHpPotionAt = 0L
     private var lastMpPotionAt = 0L
     private var lastReviveScanAt = 0L
+    private var pickupPass = 0
 
     // Multi-map navigation state. We keep map-specific steering memory outside the game client.
     @Volatile private var currentMapId = "unknown"
@@ -193,12 +195,12 @@ class BotAccessibilityService : AccessibilityService() {
         overlayStatus = stat
         panel.addView(stat)
 
-        fun addToggle(label: String, key: String) {
+        fun addToggle(label: String, key: String, defaultValue: Boolean = true) {
             val sw = Switch(this).apply {
                 text = label
                 textSize = 13f
                 setTextColor(Color.WHITE)
-                isChecked = enabled(key)
+                isChecked = enabled(key, defaultValue)
                 setPadding(dp(4), 0, dp(4), 0)
                 setOnCheckedChangeListener { _, checked ->
                     prefs().edit().putBoolean(key, checked).apply()
@@ -207,14 +209,22 @@ class BotAccessibilityService : AccessibilityService() {
             panel.addView(sw, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
         }
 
-        addToggle("Farmbot", "farmbot")
+        addToggle("Farmbot • Metiny", "farmbot")
+        addToggle("Auto EXP • Moby", "auto_exp", false)
         addToggle("Pickup", "pickup")
         addToggle("Auto Skills", "auto_skills")
         addToggle("Auto Potions", "auto_potions")
         addToggle("Auto Revive", "auto_revive")
 
+        val calibrateSkills = Button(this).apply {
+            text = "KALIBRUJ 3 SKILLE"
+            textSize = 11f
+            setOnClickListener { setPanelVisible(false); startSkillCalibration() }
+        }
+        panel.addView(calibrateSkills, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
+
         val targetInfo = TextView(this).apply {
-            text = "CEL: METINY   •   NAV: ANTI-STUCK"
+            text = "CEL: METINY / AUTO EXP   •   NAV: SAFE"
             textSize = 11f
             setTextColor(Color.rgb(150, 178, 255))
             setPadding(dp(5), dp(6), dp(5), dp(6))
@@ -501,10 +511,15 @@ class BotAccessibilityService : AccessibilityService() {
                         val normalized = normalizeGameText(raw)
                         updateMapFromText(normalized)
                         val box = line.boundingBox ?: continue
-                        if (!normalized.contains("metin") || !box.intersect(gameplay)) continue
+                        if (!box.intersect(gameplay)) continue
+                        val redScore = countRedPixelsNear(bitmap, box)
+                        val expMode = enabled("auto_exp", false)
+                        val isMetin = normalized.contains("metin")
+                        val uiNoise = normalized.contains("yang") || normalized.contains("poziom") ||
+                            normalized.contains("elderbot") || normalized.contains("szukam") || normalized.length < 3
+                        if (!isMetin && !(expMode && !uiNoise && redScore > 18)) continue
 
                         val cx = (box.left + box.right) / 2
-                        val redScore = countRedPixelsNear(bitmap, box)
                         val labelWidth = box.width().coerceAtLeast(1)
                         val labelHeight = box.height().coerceAtLeast(1)
                         val sizeScore = 100 - kotlin.math.abs(labelWidth - 90) - kotlin.math.abs(labelHeight - 18) * 2
@@ -877,6 +892,41 @@ class BotAccessibilityService : AccessibilityService() {
         )
     }
 
+    fun startSkillCalibration() {
+        val wm = windowManager ?: getSystemService(WINDOW_SERVICE) as WindowManager
+        skillCalibrationOverlay?.let { try { wm.removeView(it) } catch (_: Throwable) {} }
+        var step = 0
+        val hint = TextView(this).apply {
+            text = "Kalibracja Auto Skills: dotknij SKILL 1"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(70, 0, 0, 0))
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            setPadding(0, dp(30), 0, 0)
+        }
+        hint.setOnTouchListener { _, e ->
+            if (e.action == android.view.MotionEvent.ACTION_DOWN) {
+                val w = resources.displayMetrics.widthPixels.toFloat()
+                val h = resources.displayMetrics.heightPixels.toFloat()
+                prefs().edit().putFloat("skill_${step}_x", e.rawX / w).putFloat("skill_${step}_y", e.rawY / h).apply()
+                step++
+                if (step >= 3) {
+                    try { wm.removeView(hint) } catch (_: Throwable) {}
+                    skillCalibrationOverlay = null
+                    lastStatus = "Skille skalibrowane: 3/3"
+                    setPanelVisible(true)
+                } else hint.text = "Kalibracja Auto Skills: dotknij SKILL ${step + 1}"
+                true
+            } else true
+        }
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, 0, android.graphics.PixelFormat.TRANSLUCENT
+        )
+        skillCalibrationOverlay = hint
+        wm.addView(hint, lp)
+    }
+
     private fun tapAt(x: Float, y: Float, duration: Long = 65L, after: (() -> Unit)? = null) {
         if (!running) return
         val path = Path().apply { moveTo(x, y) }
@@ -893,7 +943,7 @@ class BotAccessibilityService : AccessibilityService() {
 
     private fun tapAttackButton(after: (() -> Unit)? = null) {
         val m = resources.displayMetrics
-        tapAt(m.widthPixels * 0.89f, m.heightPixels * 0.76f, 75L, after)
+        tapAt(m.widthPixels * 0.90f, m.heightPixels * 0.80f, 85L, after)
     }
 
     private fun tapDetectedMetin(after: (() -> Unit)? = null) {
@@ -942,6 +992,7 @@ class BotAccessibilityService : AccessibilityService() {
         mainHandler.removeCallbacks(attackLoop)
         setOverlaySymbol("…")
         lastStatus = "Metin zbity — podnoszę drop"
+        pickupPass = 0
         if (!enabled("pickup")) {
             missCount = 0
             desiredMoveX = 0f
@@ -968,79 +1019,22 @@ class BotAccessibilityService : AccessibilityService() {
      * screenshots are non-red.  This avoids blindly tapping the whole screen.
      */
     private fun captureAndPickupLoot(onDone: () -> Unit) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            onDone(); return
+        // ElderMT2 exposes a hand button only while loot is in pickup range.
+        // On the supplied 1536x709 layout its center is ~83.0% W / 49.4% H.
+        // Repeated taps are intentional: each tap picks the next available item.
+        val m = resources.displayMetrics
+        val x = m.widthPixels * 0.830f
+        val y = m.heightPixels * 0.494f
+        pickupPass = 0
+        fun next() {
+            if (!running || !enabled("pickup")) { onDone(); return }
+            if (pickupPass >= 12) { onDone(); return }
+            pickupPass++
+            lastStatus = "Pickup ręką: $pickupPass/12"
+            safeUtilityTap(x, y)
+            mainHandler.postDelayed({ next() }, 330L)
         }
-        try {
-            takeScreenshot(
-                android.view.Display.DEFAULT_DISPLAY,
-                mainExecutor,
-                object : TakeScreenshotCallback {
-                    override fun onSuccess(screenshot: ScreenshotResult) {
-                        var bitmap: Bitmap? = null
-                        try {
-                            val buffer = screenshot.hardwareBuffer
-                            try {
-                                val hw = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
-                                    ?: throw IllegalStateException("Bitmap jest pusty")
-                                bitmap = hw.copy(Bitmap.Config.ARGB_8888, false)
-                                hw.recycle()
-                            } finally { buffer.close() }
-                            val imageBitmap = bitmap ?: throw IllegalStateException("Brak obrazu")
-                            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-                            recognizer.process(InputImage.fromBitmap(imageBitmap, 0))
-                                .addOnSuccessListener { text ->
-                                    val w = imageBitmap.width
-                                    val h = imageBitmap.height
-                                    val radiusX = (w * 0.26f).toInt()
-                                    val radiusY = (h * 0.30f).toInt()
-                                    val taps = mutableListOf<Pair<Float, Float>>()
-                                    for (block in text.textBlocks) {
-                                        for (line in block.lines) {
-                                            val box = line.boundingBox ?: continue
-                                            val cx = box.centerX()
-                                            val cy = box.centerY()
-                                            if (kotlin.math.abs(cx - lastDetectedX) > radiusX) continue
-                                            if (kotlin.math.abs(cy - lastDetectedY) > radiusY) continue
-                                            if (cy < h * 0.12f || cy > h * 0.82f) continue
-                                            val normalized = line.text.lowercase(Locale.getDefault())
-                                            if (normalized.contains("metin") || normalized.contains("poziom")) continue
-                                            if (countRedPixelsNear(imageBitmap, box) > 8) continue
-                                            taps.add(cx.toFloat() to cy.toFloat())
-                                            if (taps.size >= 5) break
-                                        }
-                                        if (taps.size >= 5) break
-                                    }
-                                    recognizer.close()
-                                    bitmap?.recycle(); bitmap = null
-                                    if (taps.isEmpty()) {
-                                        // One safe fallback tap where the Metin stood.
-                                        tapAt(lastDetectedX.toFloat(), lastDetectedY.toFloat(), 70L) {
-                                            mainHandler.postDelayed({ onDone() }, 250L)
-                                        }
-                                    } else {
-                                        taps.forEachIndexed { index, point ->
-                                            mainHandler.postDelayed({
-                                                if (running) tapAt(point.first, point.second, 65L)
-                                            }, index * 260L)
-                                        }
-                                        mainHandler.postDelayed({ onDone() }, taps.size * 260L + 250L)
-                                    }
-                                }
-                                .addOnFailureListener {
-                                    recognizer.close()
-                                    bitmap?.recycle(); bitmap = null
-                                    onDone()
-                                }
-                        } catch (_: Throwable) {
-                            bitmap?.recycle()
-                            onDone()
-                        }
-                    }
-                    override fun onFailure(errorCode: Int) { onDone() }
-                }
-            )
-        } catch (_: Throwable) { onDone() }
+        next()
     }
 
     private fun estimateBarFill(bitmap: Bitmap, x1f: Float, x2f: Float, yf: Float, mode: Int): Float {
@@ -1121,12 +1115,12 @@ class BotAccessibilityService : AccessibilityService() {
     }
 
     private fun checkAutoSkills(bitmap: Bitmap) {
-        if (!attackMode || !enabled("auto_skills")) return
-        val slots = arrayOf(
-            0.870f to 0.590f,
-            0.922f to 0.595f,
-            0.831f to 0.640f
-        )
+        if (!enabled("auto_skills")) return
+        val slots = Array(3) { i ->
+            val defaultSlots = arrayOf(0.870f to 0.590f, 0.922f to 0.595f, 0.831f to 0.640f)
+            prefs().getFloat("skill_${i}_x", defaultSlots[i].first) to
+                prefs().getFloat("skill_${i}_y", defaultSlots[i].second)
+        }
         val now = System.currentTimeMillis()
         for (i in slots.indices) {
             if (now - skillLastTapAt[i] < 1400L) continue
@@ -1216,8 +1210,12 @@ class BotAccessibilityService : AccessibilityService() {
             n.contains("las duchow") -> "ghost_forest" to "Las Duchów"
             n.contains("wezowe pole") || n.contains("wezowe") -> "snakefield" to "Wężowe Pole"
             n.contains("swiatynia hwang") || n.contains("hwang") -> "hwang" to "Świątynia Hwang"
-            n.contains("bakra") || n.contains("bokjung") || n.contains("jayang") -> "m2" to "Miasto drugie"
-            n.contains("yongan") || n.contains("joan") || n.contains("pyungmoo") -> "m1" to "Miasto pierwsze"
+            n.contains("yongan") -> "yongan" to "Yongan • M1 Shinsoo"
+            n.contains("jayang") -> "jayang" to "Jayang • M2 Shinsoo"
+            n.contains("pyungmoo") -> "pyungmoo" to "Pyungmoo • M1 Jinno"
+            n.contains("bakra") -> "bakra" to "Bakra • M2 Jinno"
+            n.contains("joan") -> "joan" to "Joan • M1 Chunjo"
+            n.contains("bokjung") -> "bokjung" to "Bokjung • M2 Chunjo"
             else -> null
         }
         if (match != null) {
@@ -1237,7 +1235,12 @@ class BotAccessibilityService : AccessibilityService() {
             "fireland" -> MapRouteProfile("fireland", "Piekielna Ziemia", a(0f to -0.66f, 0.40f to -0.52f, -0.40f to -0.52f, 0.62f to -0.22f, -0.62f to -0.22f))
             "ghost_forest", "red_forest" -> MapRouteProfile(currentMapId, currentMapLabel, a(0f to -0.58f, 0.28f to -0.55f, -0.28f to -0.55f, 0.54f to -0.24f, -0.54f to -0.24f))
             "snakefield", "hwang" -> MapRouteProfile(currentMapId, currentMapLabel, a(0f to -0.64f, 0.34f to -0.54f, -0.34f to -0.54f, 0.58f to -0.20f, -0.58f to -0.20f))
-            "m1", "m2" -> MapRouteProfile(currentMapId, currentMapLabel, a(0f to -0.70f, 0.36f to -0.58f, -0.36f to -0.58f, 0.58f to -0.30f, -0.58f to -0.30f))
+            "yongan" -> MapRouteProfile("yongan", "Yongan • M1 Shinsoo", a(0f to -0.68f, 0.28f to -0.62f, 0.52f to -0.36f, 0.18f to -0.70f, -0.30f to -0.62f, -0.54f to -0.34f))
+            "jayang" -> MapRouteProfile("jayang", "Jayang • M2 Shinsoo", a(0f to -0.62f, 0.24f to -0.58f, 0.42f to -0.42f, -0.22f to -0.60f, -0.42f to -0.42f))
+            "pyungmoo" -> MapRouteProfile("pyungmoo", "Pyungmoo • M1 Jinno", a(0f to -0.64f, 0.30f to -0.56f, 0.50f to -0.34f, -0.28f to -0.58f, -0.50f to -0.34f))
+            "bakra" -> MapRouteProfile("bakra", "Bakra • M2 Jinno", a(0f to -0.60f, 0.22f to -0.58f, 0.38f to -0.44f, -0.22f to -0.58f, -0.38f to -0.44f))
+            "joan" -> MapRouteProfile("joan", "Joan • M1 Chunjo", a(0f to -0.66f, 0.26f to -0.60f, 0.48f to -0.38f, -0.26f to -0.60f, -0.48f to -0.38f))
+            "bokjung" -> MapRouteProfile("bokjung", "Bokjung • M2 Chunjo", a(0f to -0.60f, 0.20f to -0.58f, 0.40f to -0.42f, -0.20f to -0.58f, -0.40f to -0.42f))
             else -> MapRouteProfile("unknown", "Nieznana mapa", a(0f to -0.68f, 0.30f to -0.60f, -0.30f to -0.60f, 0.52f to -0.36f, -0.52f to -0.36f))
         }
     }
@@ -1413,7 +1416,7 @@ class BotAccessibilityService : AccessibilityService() {
                     if (System.currentTimeMillis() - lastTargetTapAt > 1800L) {
                         tapDetectedMetin()
                     }
-                    lastStatus = "Biję Metina do końca..."
+                    lastStatus = if (enabled("auto_exp", false)) "Auto EXP: walczę..." else "Biję Metina do końca..."
                     mainHandler.postDelayed({ farmTick() }, 560L)
                 } else {
                     attackMisses++
@@ -1436,7 +1439,7 @@ class BotAccessibilityService : AccessibilityService() {
                     return@captureAndDetectMetin
                 }
 
-                lastStatus = "Szukam Metina na trasie..."
+                lastStatus = if (enabled("auto_exp", false)) "Auto EXP: szukam mobów..." else "Szukam Metina na trasie..."
                 if (missCount >= 2) {
                     applyPatrolRoute()
                 } else {
@@ -1460,6 +1463,20 @@ class BotAccessibilityService : AccessibilityService() {
 
             if (applyAvoidanceStep()) {
                 mainHandler.postDelayed({ farmTick() }, 470L)
+                return@captureAndDetectMetin
+            }
+
+            // SAFE APPROACH V0.16: a distant OCR target no longer controls the joystick.
+            // We stay on the map route until the Metin enters a conservative capture corridor.
+            // This prevents a Metin visible behind a hill/river/rock from pulling the character
+            // straight into collision geometry.
+            val inCaptureCorridor = kotlin.math.abs(dx) < w * 0.24f && dy > -h * 0.20f && dy < h * 0.28f
+            if (!inCaptureCorridor) {
+                resetProgressWatch()
+                applyPatrolRoute()
+                lastStatus = "${currentMapLabel}: Metin widoczny • trzymam bezpieczną trasę"
+                setOverlaySymbol("◇")
+                mainHandler.postDelayed({ farmTick() }, 540L)
                 return@captureAndDetectMetin
             }
 
@@ -1545,8 +1562,8 @@ class BotAccessibilityService : AccessibilityService() {
 
     fun startBot() {
         if (running) return
-        if (!enabled("farmbot")) {
-            lastStatus = "Farmbot jest wyłączony w ustawieniach"
+        if (!enabled("farmbot") && !enabled("auto_exp", false)) {
+            lastStatus = "Włącz Farmbot lub Auto EXP"
             return
         }
         missCount = 0
@@ -1581,7 +1598,7 @@ class BotAccessibilityService : AccessibilityService() {
         currentMapLabel = prefs().getString("last_map_label", currentMapLabel) ?: currentMapLabel
         lastSafeHeadingBucket = -1
         running = true
-        lastStatus = "ElderBot: SZUKAM METINA..."
+        lastStatus = if (enabled("auto_exp", false)) "ElderBot: AUTO EXP — szukam mobów..." else "ElderBot: SZUKAM METINA..."
         setOverlaySymbol("■")
         mainHandler.post(movementLoop)
         farmTick()
