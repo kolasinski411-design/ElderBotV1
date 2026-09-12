@@ -35,6 +35,7 @@ class BotAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayButton: Button? = null
+    private var moveOverlayButton: Button? = null
     private var windowManager: WindowManager? = null
     @Volatile private var running = false
     @Volatile private var lastStatus = "Usługa gotowa"
@@ -92,6 +93,29 @@ class BotAccessibilityService : AccessibilityService() {
             windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
             windowManager?.addView(button, params)
             overlayButton = button
+        val moveButton = Button(this).apply {
+            text = "➡️ RUCH"
+            textSize = 12f
+            setPadding(10, 0, 10, 0)
+            setOnClickListener { testMoveJoystickRight() }
+        }
+        val moveParams = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            android.graphics.PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = 150
+            y = 120
+        }
+        try {
+            windowManager?.addView(moveButton, moveParams)
+            moveOverlayButton = moveButton
+        } catch (_: Throwable) {
+            moveOverlayButton = null
+        }
         } catch (_: Throwable) {
             overlayButton = null
             windowManager = null
