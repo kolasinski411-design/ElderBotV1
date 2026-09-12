@@ -97,6 +97,7 @@ class MainActivity : Activity() {
             addView(screenshot)
             addView(detect)
             addView(tapTest)
+        addView(moveTest)
             addView(start)
             addView(stop)
             addView(status)
