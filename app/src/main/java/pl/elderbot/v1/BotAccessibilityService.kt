@@ -35,7 +35,6 @@ class BotAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var overlayButton: Button? = null
-    private var moveOverlayButton: Button? = null
     private var windowManager: WindowManager? = null
     @Volatile private var running = false
     @Volatile private var lastStatus = "Usługa gotowa"
@@ -514,198 +513,147 @@ class BotAccessibilityService : AccessibilityService() {
     }
 
     
-private fun moveJoystick(dx: Float, dy: Float, duration: Long = 500L) {
-    val metrics = resources.displayMetrics
-    val w = metrics.widthPixels.toFloat()
-    val h = metrics.heightPixels.toFloat()
 
-    val startX = w * 0.13f
-    val startY = h * 0.77f
-    val endX = startX + dx * w * 0.055f
-    val endY = startY + dy * h * 0.055f
-
-    val path = Path().apply {
-        moveTo(startX, startY)
-        lineTo(endX, endY)
+    private fun updateDetectedPosition(x: Int, y: Int) {
+        lastDetectedX = x
+        lastDetectedY = y
     }
 
-    val stroke = GestureDescription.StrokeDescription(path, 0, duration)
-
-    dispatchGesture(
-        GestureDescription.Builder().addStroke(stroke).build(),
-        null,
-        null
-    )
-}
-
-fun testMoveJoystickLeft() {
-    if (running) return
-    moveJoystick(-1f, 0f)
-    lastStatus = "Test ruchu: LEWO"
-}
-
-fun testMoveJoystickRight() {
-    if (running) return
-    moveJoystick(1f, 0f)
-    lastStatus = "Test ruchu: PRAWO"
-}
-
-private fun tapAttackButton() {
-    val metrics = resources.displayMetrics
-    val w = metrics.widthPixels.toFloat()
-    val h = metrics.heightPixels.toFloat()
-
-    val x = w * 0.89f
-    val y = h * 0.76f
-
-    val path = Path().apply {
-        moveTo(x, y)
-    }
-
-    val stroke = GestureDescription.StrokeDescription(path, 0, 80)
-
-    dispatchGesture(
-        GestureDescription.Builder().addStroke(stroke).build(),
-        null,
-        null
-    )
-}
-
-private fun farmTick() {
-    if (!running) return
-
-    captureAndDetectMetin { found, _ ->
-        if (!running) return@captureAndDetectMetin
-
-        if (!found) {
-            lastStatus = "Szukam Metina..."
-            mainHandler.postDelayed({ farmTick() }, 700L)
-            return@captureAndDetectMetin
+    private fun setOverlaySymbol(symbol: String) {
+        mainHandler.post {
+            try { overlayButton?.text = symbol } catch (_: Throwable) {}
         }
-
-        val metrics = resources.displayMetrics
-        val w = metrics.widthPixels.toFloat()
-        val h = metrics.heightPixels.toFloat()
-
-        val centerX = w * 0.50f
-        val centerY = h * 0.48f
-
-        val dx = lastDetectedX - centerX
-        val dy = lastDetectedY - centerY
-
-        val normX = (dx / (w * 0.38f)).coerceIn(-1f, 1f)
-        val normY = (dy / (h * 0.34f)).coerceIn(-1f, 1f)
-
-        val distance = kotlin.math.sqrt(dx * dx + dy * dy)
-
-        val attackDistance = w * 0.10f
-        val slowDistance = w * 0.24f
-
-        if (distance <= attackDistance) {
-            lastStatus = "Metin blisko — ATAK"
-            tapAttackButton()
-            mainHandler.postDelayed({ farmTick() }, 500L)
-            return@captureAndDetectMetin
-        }
-
-        val strength =
-            if (distance < slowDistance) 0.45f
-            else 0.85f
-
-        val moveX = normX * strength
-        val moveY = normY * strength
-
-        val duration =
-            if (distance < slowDistance) 260L
-            else 430L
-
-        moveJoystick(moveX, moveY, duration)
-
-        lastStatus =
-            "Podejście płynne: X=${dx.toInt()} Y=${dy.toInt()} D=${distance.toInt()}"
-
-        mainHandler.postDelayed({ farmTick() }, 420L)
     }
-}
 
-private var lastDetectedX: Int = 0
-private var lastDetectedY: Int = 0
-
-private fun updateDetectedPosition(x: Int, y: Int) {
-    lastDetectedX = x
-    lastDetectedY = y
-}
-
-    private fun moveJoystick(dx: Float, dy: Float, duration: Long = 420L) {
+    private fun moveJoystick(dx: Float, dy: Float, duration: Long = 360L) {
         if (!running) return
-        val m=resources.displayMetrics; val w=m.widthPixels.toFloat(); val h=m.heightPixels.toFloat()
-        val sx=w*0.13f; val sy=h*0.77f; val radius=w*0.055f
-        val ex=sx+radius*dx.coerceIn(-1f,1f); val ey=sy+radius*dy.coerceIn(-1f,1f)
-        val path=Path().apply { moveTo(sx,sy); lineTo(ex,ey) }
-        val stroke=GestureDescription.StrokeDescription(path,0,duration)
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(),null,null)
+        val m = resources.displayMetrics
+        val w = m.widthPixels.toFloat()
+        val h = m.heightPixels.toFloat()
+        val startX = w * 0.13f
+        val startY = h * 0.77f
+        val radiusX = w * 0.055f
+        val radiusY = h * 0.055f
+        val endX = startX + radiusX * dx.coerceIn(-1f, 1f)
+        val endY = startY + radiusY * dy.coerceIn(-1f, 1f)
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, duration)
+        dispatchGesture(
+            GestureDescription.Builder().addStroke(stroke).build(),
+            null,
+            null
+        )
     }
 
     private fun tapAttackButton() {
         if (!running) return
-        val m=resources.displayMetrics
-        val path=Path().apply { moveTo(m.widthPixels*0.89f,m.heightPixels*0.76f) }
-        val stroke=GestureDescription.StrokeDescription(path,0,70L)
-        dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(),null,null)
+        val m = resources.displayMetrics
+        val path = Path().apply {
+            moveTo(m.widthPixels * 0.89f, m.heightPixels * 0.76f)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0, 70L)
+        dispatchGesture(
+            GestureDescription.Builder().addStroke(stroke).build(),
+            null,
+            null
+        )
     }
 
     private fun farmTick() {
         if (!running) return
+
         captureAndDetectMetin { found, _ ->
             if (!running) return@captureAndDetectMetin
-            val m=resources.displayMetrics; val w=m.widthPixels.toFloat(); val h=m.heightPixels.toFloat()
+
+            val m = resources.displayMetrics
+            val w = m.widthPixels.toFloat()
+            val h = m.heightPixels.toFloat()
+
             if (!found) {
                 missCount++
-                lastStatus="Szukam Metina..."
-                if (missCount>=2) {
-                    val pattern=arrayOf(0.00f to -0.52f, 0.34f to -0.44f, 0.00f to -0.52f, -0.34f to -0.44f)
-                    val p=pattern[searchStep % pattern.size]; searchStep++
-                    lastMoveX=p.first; lastMoveY=p.second; moveJoystick(p.first,p.second,300L)
+                lastStatus = "Szukam Metina..."
+
+                // Po dwóch pustych skanach wykonaj krótki, łagodny ruch poszukiwawczy.
+                if (missCount >= 2) {
+                    val pattern = arrayOf(
+                        0.00f to -0.50f,
+                        0.30f to -0.42f,
+                        0.00f to -0.50f,
+                        -0.30f to -0.42f
+                    )
+                    val p = pattern[searchStep % pattern.size]
+                    searchStep++
+                    lastMoveX = p.first
+                    lastMoveY = p.second
+                    moveJoystick(p.first, p.second, 290L)
                 }
-                mainHandler.postDelayed({ farmTick() },650L); return@captureAndDetectMetin
+
+                mainHandler.postDelayed({ farmTick() }, 650L)
+                return@captureAndDetectMetin
             }
-            missCount=0
-            val dx=lastDetectedX-w*0.50f; val dy=lastDetectedY-h*0.48f
-            val centered=kotlin.math.abs(dx)<w*0.10f && kotlin.math.abs(dy)<h*0.17f
-            if (centered) {
-                lastMoveX=0f; lastMoveY=0f; lastStatus="Metin blisko — ATAK"; tapAttackButton()
-                mainHandler.postDelayed({ farmTick() },480L); return@captureAndDetectMetin
+
+            missCount = 0
+            val dx = lastDetectedX - w * 0.50f
+            val dy = lastDetectedY - h * 0.48f
+
+            val closeEnough =
+                kotlin.math.abs(dx) < w * 0.10f &&
+                kotlin.math.abs(dy) < h * 0.17f
+
+            if (closeEnough) {
+                lastMoveX = 0f
+                lastMoveY = 0f
+                lastStatus = "Metin blisko — ATAK"
+                tapAttackButton()
+                mainHandler.postDelayed({ farmTick() }, 480L)
+                return@captureAndDetectMetin
             }
-            val tx=(dx/(w*0.34f)).coerceIn(-0.90f,0.90f)
-            val ty=(dy/(h*0.34f)).coerceIn(-0.90f,0.90f)
-            val mx=(lastMoveX*0.35f+tx*0.65f).coerceIn(-0.90f,0.90f)
-            val my=(lastMoveY*0.35f+ty*0.65f).coerceIn(-0.90f,0.90f)
-            lastMoveX=mx; lastMoveY=my
-            moveJoystick(mx,my,360L)
-            lastStatus="Podejście do Metina: X=${dx.toInt()} Y=${dy.toInt()}"
-            mainHandler.postDelayed({ farmTick() },430L)
+
+            val targetX = (dx / (w * 0.34f)).coerceIn(-0.90f, 0.90f)
+            val targetY = (dy / (h * 0.34f)).coerceIn(-0.90f, 0.90f)
+
+            // Wygładzanie zapobiega gwałtownemu przeskakiwaniu kierunku.
+            val moveX = (lastMoveX * 0.35f + targetX * 0.65f).coerceIn(-0.90f, 0.90f)
+            val moveY = (lastMoveY * 0.35f + targetY * 0.65f).coerceIn(-0.90f, 0.90f)
+            lastMoveX = moveX
+            lastMoveY = moveY
+
+            moveJoystick(moveX, moveY, 360L)
+            lastStatus = "Podejście do Metina: X=${dx.toInt()} Y=${dy.toInt()}"
+            mainHandler.postDelayed({ farmTick() }, 430L)
         }
     }
 
-fun startBot() {
-    if (running) return
+    fun startBot() {
+        if (running) return
+        missCount = 0
+        searchStep = 0
+        lastMoveX = 0f
+        lastMoveY = 0f
+        running = true
+        lastStatus = "ElderBot: SZUKAM METINA..."
+        setOverlaySymbol("■")
+        farmTick()
+    }
 
-    running = true
-    lastStatus = "ElderBot: SZUKAM METINA..."
-    farmTick()
-}
+    fun stopBot() {
+        running = false
+        missCount = 0
+        lastMoveX = 0f
+        lastMoveY = 0f
+        mainHandler.removeCallbacksAndMessages(null)
+        lastStatus = "Bot zatrzymany"
+        setOverlaySymbol("▶")
+    }
 
-fun stopBot() {
-    running = false
-    mainHandler.removeCallbacksAndMessages(null)
-    lastStatus = "Bot zatrzymany"
-}
-
-override fun onDestroy() {
-        removeScreenshotOverlay()
-        instance = null
+    override fun onDestroy() {
         running = false
         mainHandler.removeCallbacksAndMessages(null)
+        removeScreenshotOverlay()
+        instance = null
         super.onDestroy()
     }
 }

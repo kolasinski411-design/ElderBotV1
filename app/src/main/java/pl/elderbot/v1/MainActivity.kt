@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
-import android.graphics.Color
 import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
@@ -16,76 +15,44 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        status = TextView(this).apply {
-            text = "Sprawdzanie usługi…"
-            textSize = 16f
-            setPadding(24, 24, 24, 24)
-        }
-
         val title = TextView(this).apply {
-            text = "ElderBot V2"
+            text = "ElderBot V0.7"
             textSize = 28f
             gravity = Gravity.CENTER
             setPadding(16, 32, 16, 12)
         }
 
         val info = TextView(this).apply {
-            text = "V2: wykrywanie Metina na podstawie nazwy widocznej na ekranie (OCR) + położenia obiektu.\n\nNa tym etapie bot tylko analizuje obraz. Nie porusza postacią i nie atakuje."
+            text = "Rdzeń farmienia: OCR Metina → podejście → atak → ponowne szukanie. W grze użyj małego przycisku ▶/■."
             textSize = 15f
-            setTextColor(Color.DKGRAY)
             setPadding(24, 8, 24, 24)
         }
 
+        status = TextView(this).apply {
+            text = "Sprawdzanie usługi…"
+            textSize = 16f
+            setPadding(24, 24, 24, 24)
+        }
+
         val openSettings = Button(this).apply {
-            text = "1. Włącz usługę dostępności"
+            text = "Włącz usługę dostępności"
             setOnClickListener { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        }
-
-        val screenshot = Button(this).apply {
-            text = "2. Zrób zrzut ekranu gry"
-            setOnClickListener {
-                val service = BotAccessibilityService.instance
-                if (service == null) {
-                    status.text = "Najpierw włącz usługę dostępności."
-                } else {
-                    service.captureAndSaveScreenshot { _, message -> status.text = message }
-                }
-            }
-        }
-
-        val detect = Button(this).apply {
-            text = "3. TEST V2 — WYKRYJ METINA"
-            setOnClickListener {
-                val service = BotAccessibilityService.instance
-                if (service == null) {
-                    status.text = "Najpierw włącz usługę dostępności."
-                } else {
-                    service.captureAndDetectMetin { _, message -> status.text = message }
-                }
-            }
-        }
-
-        val tapTest = Button(this).apply {
-            text = "3. Testowy dotyk na środku ekranu"
-            setOnClickListener { BotAccessibilityService.instance?.tapScreenCentre() ?: run { status.text = "Najpierw włącz usługę dostępności." } }
-        }
-
-        val moveTest = Button(this).apply {
-            text = "4. TEST RUCHU →"
-            setOnClickListener {
-                BotAccessibilityService.instance?.testMoveJoystickRight()
-                    ?: run { status.text = "Najpierw włącz usługę dostępności." }
-            }
         }
 
         val start = Button(this).apply {
             text = "START"
-            setOnClickListener { BotAccessibilityService.instance?.startBot() ?: run { status.text = "Najpierw włącz usługę dostępności." } }
+            setOnClickListener {
+                BotAccessibilityService.instance?.startBot()
+                    ?: run { status.text = "Najpierw włącz usługę dostępności." }
+            }
         }
 
         val stop = Button(this).apply {
             text = "STOP"
-            setOnClickListener { BotAccessibilityService.instance?.stopBot() ?: run { status.text = "Usługa nie jest aktywna." } }
+            setOnClickListener {
+                BotAccessibilityService.instance?.stopBot()
+                    ?: run { status.text = "Usługa nie jest aktywna." }
+            }
         }
 
         val layout = LinearLayout(this).apply {
@@ -94,10 +61,6 @@ class MainActivity : Activity() {
             addView(title)
             addView(info)
             addView(openSettings)
-            addView(screenshot)
-            addView(detect)
-            addView(tapTest)
-        addView(moveTest)
             addView(start)
             addView(stop)
             addView(status)
@@ -107,6 +70,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        status.text = BotAccessibilityService.instance?.status() ?: "Usługa dostępności jest wyłączona."
+        status.text = BotAccessibilityService.instance?.status()
+            ?: "Usługa dostępności jest wyłączona."
     }
 }
