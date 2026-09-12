@@ -94,7 +94,7 @@ class BotAccessibilityService : AccessibilityService() {
             windowManager?.addView(button, params)
             overlayButton = button
         val moveButton = Button(this).apply {
-            text = "➡️ RUCH"
+            text = "⬅️ LEWO / ➡️ PRAWO"
             textSize = 12f
             setPadding(10, 0, 10, 0)
             setOnClickListener { testMoveJoystickRight() }
@@ -530,7 +530,7 @@ class BotAccessibilityService : AccessibilityService() {
         lastStatus = "Wysłano testowy dotyk: środek ekranu"
     }
 
-    fun testMoveJoystickRight() {
+    fun testMoveJoystickLeft() {
         if (running) return
         val metrics = resources.displayMetrics
         val w = metrics.widthPixels.toFloat()
