@@ -27,6 +27,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Switch
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import java.text.SimpleDateFormat
@@ -62,6 +63,8 @@ class BotAccessibilityService : AccessibilityService() {
     private var joystickEndY = 0f
     private var attackMode = false
     private var attackMisses = 0
+    private var attackConfirmed = false
+    private var attackSelectAttempts = 0
     private var lastTargetTapAt = 0L
     private var progressAnchorX = 0
     private var progressAnchorY = 0
@@ -119,6 +122,7 @@ class BotAccessibilityService : AccessibilityService() {
     private var routeTargetObservedAt = 0L
     private var routeBestTargetError = Float.MAX_VALUE
     private var pickupAbsentFrames = 0
+    @Volatile private var selectedTargetBarVisible = false
 
     // Multi-map navigation state. We keep map-specific steering memory outside the game client.
     @Volatile private var currentMapId = "unknown"
@@ -280,7 +284,32 @@ class BotAccessibilityService : AccessibilityService() {
 
         addToggle("Farmbot • Metiny", "farmbot")
         addToggle("Bossy / Minibossy M1 + M2", "auto_boss", true)
-        addToggle("Auto EXP • Moby", "auto_exp", false)
+        addToggle("Auto Łowy • Wszystkie moby", "auto_exp", false)
+
+        val focusLabel = TextView(this).apply {
+            val pct = prefs().getInt("auto_hunt_focus", 70)
+            text = "Zasięg Auto Łowów: ${pct}%"
+            textSize = 11f
+            setTextColor(Color.LTGRAY)
+            setPadding(dp(5), dp(2), dp(5), 0)
+        }
+        scrollContent.addView(focusLabel)
+        val focusSeek = SeekBar(this).apply {
+            min = 30
+            max = 95
+            progress = prefs().getInt("auto_hunt_focus", 70).coerceIn(30, 95)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, value: Int, fromUser: Boolean) {
+                    if (fromUser) {
+                        prefs().edit().putInt("auto_hunt_focus", value).apply()
+                        focusLabel.text = "Zasięg Auto Łowów: ${value}%"
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            })
+        }
+        scrollContent.addView(focusSeek, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(34)))
         addToggle("Pickup", "pickup")
         addToggle("Auto Skills", "auto_skills")
         addToggle("Auto Potions", "auto_potions")
@@ -294,7 +323,7 @@ class BotAccessibilityService : AccessibilityService() {
         scrollContent.addView(calibrateSkills, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)))
 
         val targetInfo = TextView(this).apply {
-            text = "PRIORYTET: BOSS > METIN > EXP   •   NAV: SAFE"
+            text = "PRIORYTET: BOSS > METIN > AUTO ŁOWY   •   najbliższy cel pierwszy"
             textSize = 11f
             setTextColor(Color.rgb(150, 178, 255))
             setPadding(dp(5), dp(6), dp(5), dp(6))
@@ -478,6 +507,7 @@ class BotAccessibilityService : AccessibilityService() {
                             }
 
                             val captured = bitmap ?: throw IllegalStateException("Brak obrazu")
+                            selectedTargetBarVisible = selectedTargetBarLooksVisible(captured)
                             if (running) {
                                 lastSceneMotion = updateSceneMotion(captured)
                                 checkAutoPotions(captured)
@@ -607,10 +637,12 @@ class BotAccessibilityService : AccessibilityService() {
         if (coreTargetKind.isBlank() || candidate.kind != coreTargetKind) return false
         val dx = candidate.targetX - coreTargetX
         val dy = candidate.targetY - coreTargetY
-        val maxDistance = if (candidate.kind == "EXP") 260 else 330
+        val maxDistance = if (candidate.kind == "EXP") 300 else 330
         val nearPreviousPosition = dx * dx + dy * dy < maxDistance * maxDistance
         if (!nearPreviousPosition) return false
-        return coreTargetName.isBlank() || candidate.name == coreTargetName || candidate.kind != "EXP"
+        // Auto Łowy follows the nearest red world label spatially. Requiring an exact OCR name
+        // causes target loss when several mobs overlap or ML Kit reads the same label differently.
+        return candidate.kind == "EXP" || coreTargetName.isBlank() || candidate.name == coreTargetName
     }
 
     private fun isPlausibleExpWorldLabel(raw: String, normalized: String, box: Rect, w: Int, h: Int): Boolean {
@@ -710,6 +742,11 @@ class BotAccessibilityService : AccessibilityService() {
                         val ddx = targetX - playerX
                         val ddy = targetY - playerY
                         val distance = kotlin.math.sqrt(ddx * ddx + ddy * ddy).toFloat()
+                        if (kind == "EXP") {
+                            val focusPct = prefs().getInt("auto_hunt_focus", 70).coerceIn(30, 95) / 100f
+                            val focusRadius = kotlin.math.min(w, h) * (0.86f * focusPct + 0.18f)
+                            if (distance > focusRadius) continue
+                        }
 
                         candidates.add(
                             OcrTargetCandidate(
@@ -838,6 +875,38 @@ class BotAccessibilityService : AccessibilityService() {
                 if (expLockActive) expLockMisses++
                 onResult(MetinDetection(false, Rect(), 0, 0))
             }
+    }
+
+    private fun selectedTargetBarLooksVisible(bitmap: Bitmap): Boolean {
+        // ElderMT2 shows the selected enemy HP bar at the top-centre of the screen.
+        // Detecting that bar is much more reliable during combat than repeatedly OCR-tracking
+        // a red world label hidden by other mobs. This remains screen-only visual analysis.
+        val w = bitmap.width
+        val h = bitmap.height
+        val left = (w * 0.34f).toInt().coerceIn(0, w - 1)
+        val right = (w * 0.69f).toInt().coerceIn(left + 1, w)
+        val top = (h * 0.055f).toInt().coerceIn(0, h - 1)
+        val bottom = (h * 0.115f).toInt().coerceIn(top + 1, h)
+        val requiredRun = (w * 0.025f).toInt().coerceAtLeast(18)
+        var matchingRows = 0
+        for (y in top until bottom step 2) {
+            var run = 0
+            var bestRun = 0
+            for (x in left until right step 2) {
+                val c = bitmap.getPixel(x, y)
+                val r = android.graphics.Color.red(c)
+                val g = android.graphics.Color.green(c)
+                val b = android.graphics.Color.blue(c)
+                val red = r >= 85 && r > g * 1.32f && r > b * 1.24f
+                if (red) {
+                    run += 2
+                    if (run > bestRun) bestRun = run
+                } else run = 0
+            }
+            if (bestRun >= requiredRun) matchingRows++
+            if (matchingRows >= 2) return true
+        }
+        return false
     }
 
     private fun updateSceneMotion(bitmap: Bitmap): Float {
@@ -1240,7 +1309,7 @@ class BotAccessibilityService : AccessibilityService() {
 
     private val attackLoop = object : Runnable {
         override fun run() {
-            if (!running || !attackMode) return
+            if (!running || !attackMode || !attackConfirmed) return
             tapAttackButton()
             mainHandler.postDelayed(this, 310L)
         }
@@ -1249,28 +1318,30 @@ class BotAccessibilityService : AccessibilityService() {
     private fun beginAttackMode() {
         if (!running || attackMode) return
         attackMode = true
+        attackConfirmed = false
+        attackSelectAttempts = 0
         coreState = CoreState.COMBAT
         attackMisses = 0
         desiredMoveX = 0f
         desiredMoveY = 0f
+        lastMoveX = 0f
+        lastMoveY = 0f
+        selectedTargetBarVisible = false
         lastStatus = when (lastTargetKind) {
-            "BOSS" -> "Boss wybrany — ATAK"
-            "EXP" -> "Mob namierzony — ATAK"
-            else -> "Metin wybrany — ATAK"
+            "BOSS" -> "Boss: zaznaczam cel"
+            "EXP" -> "Auto Łowy: zaznaczam moba"
+            else -> "Metin: zaznaczam cel"
         }
-        setOverlaySymbol("⚔")
+        setOverlaySymbol("◎")
 
         finishJoystickGesture {
             if (!running || !attackMode) return@finishJoystickGesture
-            // Select the detected Metin first.  A generic attack tap without a
-            // selected target was the reason previous builds often did nothing.
+            // Do not start swinging immediately. First tap the world target and wait until
+            // ElderMT2 confirms the selection with its own top HP bar. This prevents the
+            // characteristic one-hit-in-the-air behaviour from previous builds.
             tapDetectedMetin {
-                mainHandler.postDelayed({
-                    if (running && attackMode) {
-                        tapAttackButton()
-                        mainHandler.postDelayed(attackLoop, 260L)
-                    }
-                }, 160L)
+                attackSelectAttempts = 1
+                mainHandler.postDelayed({ if (running && attackMode) farmTick() }, 260L)
             }
         }
     }
@@ -1279,6 +1350,8 @@ class BotAccessibilityService : AccessibilityService() {
         if (!running) return
         attackMode = false
         attackMisses = 0
+        attackConfirmed = false
+        attackSelectAttempts = 0
         coreState = CoreState.PICKUP
         mainHandler.removeCallbacks(attackLoop)
         setOverlaySymbol("…")
@@ -1313,7 +1386,7 @@ class BotAccessibilityService : AccessibilityService() {
             coreState = CoreState.SEARCH_ROUTE
             setOverlaySymbol("■")
             lastStatus = when (finishedKind) {
-                "EXP" -> "Auto EXP: szukam następnego moba..."
+                "EXP" -> "Auto Łowy: szukam następnego moba..."
                 "BOSS" -> "Szukam kolejnego bossa / Metina..."
                 else -> "Szukam następnego Metina..."
             }
@@ -1328,10 +1401,10 @@ class BotAccessibilityService : AccessibilityService() {
      */
     private fun pickupHandLooksVisible(bitmap: Bitmap): Boolean {
         // Calibrated from the two ElderMT2 screenshots supplied by the user:
-        // the pickup hand appears around 83% W / 49.4% H as a dark round button
+        // the pickup hand appears around 83% W / 51.5% H as a dark round button
         // with a small bright hand glyph. No game data is read.
         val cx = (bitmap.width * 0.830f).toInt()
-        val cy = (bitmap.height * 0.494f).toInt()
+        val cy = (bitmap.height * 0.515f).toInt()
         val radius = (bitmap.height * 0.055f).toInt().coerceAtLeast(22)
         var bright = 0
         var dark = 0
@@ -1397,7 +1470,7 @@ class BotAccessibilityService : AccessibilityService() {
     private fun captureAndPickupLoot(onDone: () -> Unit) {
         val m = resources.displayMetrics
         val x = m.widthPixels * 0.830f
-        val y = m.heightPixels * 0.494f
+        val y = m.heightPixels * 0.515f
         pickupPass = 0
         pickupAbsentFrames = 0
         coreState = CoreState.PICKUP
@@ -1812,20 +1885,54 @@ class BotAccessibilityService : AccessibilityService() {
             // locked target, but the bot never jumps to a different mob just because it appeared.
             if (attackMode) {
                 coreState = CoreState.COMBAT
-                if (found) {
+                desiredMoveX = 0f
+                desiredMoveY = 0f
+                lastMoveX = 0f
+                lastMoveY = 0f
+
+                if (selectedTargetBarVisible) {
+                    // ElderMT2 itself confirmed a selected target. Only now may the bot start
+                    // the attack loop. From this point world-label OCR no longer decides whether
+                    // the fight is alive; the selected-target HP bar does.
                     attackMisses = 0
-                    if (now - lastTargetTapAt > 1800L) tapDetectedMetin()
-                    lastStatus = when (lastTargetKind) {
-                        "BOSS" -> "Walka: boss / miniboss"
-                        "EXP" -> "Walka: ${if (lastDetectedName.isBlank()) "mob" else lastDetectedName}"
-                        else -> "Walka: Metin"
+                    attackSelectAttempts = 0
+                    if (!attackConfirmed) {
+                        attackConfirmed = true
+                        mainHandler.removeCallbacks(attackLoop)
+                        tapAttackButton()
+                        mainHandler.postDelayed(attackLoop, 260L)
                     }
-                    mainHandler.postDelayed({ farmTick() }, 540L)
+                    lastStatus = when (lastTargetKind) {
+                        "BOSS" -> "Walka: boss / miniboss • HP LOCK"
+                        "EXP" -> "Auto Łowy: walka • HP LOCK"
+                        else -> "Walka: Metin • HP LOCK"
+                    }
+                    mainHandler.postDelayed({ farmTick() }, 420L)
+                } else if (!attackConfirmed) {
+                    // Selection has not been confirmed yet: never swing into the air. Re-tap the
+                    // candidate a few times, then abandon it cleanly if the game never shows HP.
+                    attackSelectAttempts++
+                    if (found && now - lastTargetTapAt > 650L) tapDetectedMetin()
+                    lastStatus = "Zaznaczam cel • czekam na pasek HP ($attackSelectAttempts/6)"
+                    if (attackSelectAttempts >= 6) {
+                        attackMode = false
+                        attackConfirmed = false
+                        mainHandler.removeCallbacks(attackLoop)
+                        if (lastTargetKind == "EXP") clearExpLock()
+                        clearCoreTarget()
+                        coreState = CoreState.SEARCH_ROUTE
+                        setOverlaySymbol("⌕")
+                        lastStatus = "Nie udało się zaznaczyć celu • szukam następnego"
+                        mainHandler.postDelayed({ farmTick() }, 320L)
+                    } else {
+                        mainHandler.postDelayed({ farmTick() }, 300L)
+                    }
                 } else {
+                    // A confirmed fight ended only after the game HP bar vanished repeatedly.
                     attackMisses++
-                    lastStatus = "Walka: sprawdzam cel ($attackMisses/4)"
-                    if (attackMisses >= 4) finishAttackAndPickup()
-                    else mainHandler.postDelayed({ farmTick() }, 500L)
+                    lastStatus = "Walka: pasek celu zniknął ($attackMisses/3)"
+                    if (attackMisses >= 3) finishAttackAndPickup()
+                    else mainHandler.postDelayed({ farmTick() }, 360L)
                 }
                 return@captureAndDetectMetin
             }
@@ -1858,7 +1965,15 @@ class BotAccessibilityService : AccessibilityService() {
                     return@captureAndDetectMetin
                 }
 
-                if (missCount >= 2) {
+                val onlyAutoHunt = enabled("auto_exp", false) && !enabled("farmbot") && !enabled("auto_boss", true)
+                if (onlyAutoHunt) {
+                    // Official-style local Auto-Hunt: do not wander across the whole map when no
+                    // monster is inside the configured focus area. Wait and rescan locally.
+                    desiredMoveX = 0f
+                    desiredMoveY = 0f
+                    lastMoveX = 0f
+                    lastMoveY = 0f
+                } else if (missCount >= 2) {
                     applyPatrolRoute()
                 } else {
                     desiredMoveX = lastMoveX * 0.90f
@@ -1866,10 +1981,10 @@ class BotAccessibilityService : AccessibilityService() {
                 }
                 lastStatus = when {
                     enabled("auto_boss", true) && enabled("farmbot") && enabled("auto_exp", false) ->
-                        "Trasa • skan: BOSS > METIN > EXP"
+                        "Trasa • skan: BOSS > METIN > AUTO ŁOWY"
                     enabled("auto_boss", true) && enabled("farmbot") ->
                         "Trasa • skan: BOSS > METIN"
-                    enabled("auto_exp", false) -> "Trasa • Auto EXP szuka mobów"
+                    enabled("auto_exp", false) -> "Auto Łowy: brak mobów w zasięgu • czekam"
                     else -> "Trasa • szukam celu"
                 }
                 mainHandler.postDelayed({ farmTick() }, 540L)
@@ -1954,7 +2069,7 @@ class BotAccessibilityService : AccessibilityService() {
                 if (isExpTarget) {
                     expRangeConfirmFrames++
                     if (expRangeConfirmFrames < 2) {
-                        lastStatus = "Auto EXP: potwierdzam zasięg"
+                        lastStatus = "Auto Łowy: potwierdzam zasięg"
                         mainHandler.postDelayed({ farmTick() }, 230L)
                         return@captureAndDetectMetin
                     }
@@ -2036,7 +2151,7 @@ class BotAccessibilityService : AccessibilityService() {
             lastStatus = when (lastTargetKind) {
                 "BOSS" -> "Podejście: BOSS • ${if (lastDetectedName.isBlank()) "cel" else lastDetectedName}"
                 "METIN" -> "Podejście: METIN • ${if (lastDetectedName.isBlank()) "cel" else lastDetectedName}"
-                else -> "Auto EXP: LOCK • ${if (lastDetectedName.isBlank()) "mob" else lastDetectedName}"
+                else -> "Auto Łowy: najbliższy mob • ${if (lastDetectedName.isBlank()) "cel" else lastDetectedName}"
             }
             mainHandler.postDelayed({ farmTick() }, 500L)
         }
@@ -2056,6 +2171,9 @@ class BotAccessibilityService : AccessibilityService() {
         desiredMoveY = 0f
         attackMode = false
         attackMisses = 0
+        attackConfirmed = false
+        attackSelectAttempts = 0
+        selectedTargetBarVisible = false
         activeJoystickStroke = null
         resetProgressWatch()
         previousSceneSample = null
@@ -2086,7 +2204,10 @@ class BotAccessibilityService : AccessibilityService() {
         lastDetectedLabelBottom = 0
         lastDetectedLabelHeight = 0
         running = true
-        lastStatus = if (enabled("auto_exp", false)) "ElderBot: AUTO EXP — szukam mobów..." else "ElderBot: SZUKAM METINA..."
+        // Keep the control panel from covering world labels or the pickup hand button while
+        // automation is active. The compact EB button remains available to reopen it instantly.
+        setPanelVisible(false)
+        lastStatus = if (enabled("auto_exp", false)) "ElderBot: AUTO ŁOWY — szukam najbliższych mobów..." else "ElderBot: SZUKAM METINA..."
         setOverlaySymbol("■")
         mainHandler.post(movementLoop)
         farmTick()
@@ -2096,6 +2217,9 @@ class BotAccessibilityService : AccessibilityService() {
         running = false
         attackMode = false
         attackMisses = 0
+        attackConfirmed = false
+        attackSelectAttempts = 0
+        selectedTargetBarVisible = false
         missCount = 0
         lastMoveX = 0f
         lastMoveY = 0f
