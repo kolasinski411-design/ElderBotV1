@@ -58,7 +58,7 @@ class MainActivity : Activity() {
             setPadding(18, 24, 18, 2)
         }
         val sub = TextView(this).apply {
-            text = "V0.17 • PICKUP RĘKĄ • AUTO EXP • KALIBRACJA SKILLI"
+            text = "V0.20 • CORE REWORK • TARGET LOCK • ROUTE FARMING"
             textSize = 12f
             setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER

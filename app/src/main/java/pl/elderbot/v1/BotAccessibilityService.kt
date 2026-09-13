@@ -91,6 +91,35 @@ class BotAccessibilityService : AccessibilityService() {
     private var lastReviveScanAt = 0L
     private var pickupPass = 0
 
+    // EXP target lock. Ordinary mobs can share names, so the lock uses both the OCR name
+    // and the last screen position. This keeps one mob selected across consecutive frames
+    // instead of jumping between red labels while the character is moving.
+    private var expLockActive = false
+    private var expLockName = ""
+    private var expLockX = 0
+    private var expLockY = 0
+    private var expLockSeenAt = 0L
+    private var expLockMisses = 0
+    private var expRangeConfirmFrames = 0
+    private var lastDetectedLabelBottom = 0
+    private var lastDetectedLabelHeight = 0
+    private var lastDetectedName = ""
+
+    // V0.20 core state machine. Target acquisition, navigation, combat and pickup are
+    // separate phases so utility modules cannot accidentally hijack the main farming loop.
+    private enum class CoreState { STOPPED, SEARCH_ROUTE, TARGET_APPROACH, COMBAT, PICKUP, RECOVER }
+    @Volatile private var coreState = CoreState.STOPPED
+    private var coreTargetKind = ""
+    private var coreTargetName = ""
+    private var coreTargetX = 0
+    private var coreTargetY = 0
+    private var coreTargetSeenAt = 0L
+    private var coreTargetMisses = 0
+    private var coreTargetLockedAt = 0L
+    private var routeTargetObservedAt = 0L
+    private var routeBestTargetError = Float.MAX_VALUE
+    private var pickupAbsentFrames = 0
+
     // Multi-map navigation state. We keep map-specific steering memory outside the game client.
     @Volatile private var currentMapId = "unknown"
     @Volatile private var currentMapLabel = "Nieznana mapa"
@@ -510,6 +539,104 @@ class BotAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun clearExpLock() {
+        expLockActive = false
+        expLockName = ""
+        expLockX = 0
+        expLockY = 0
+        expLockSeenAt = 0L
+        expLockMisses = 0
+        expRangeConfirmFrames = 0
+    }
+
+    private data class OcrTargetCandidate(
+        val name: String,
+        val kind: String,
+        val label: Rect,
+        val targetX: Int,
+        val targetY: Int,
+        val redScore: Int,
+        val playerDistance: Float
+    )
+
+    private fun targetPriority(kind: String): Int = when (kind) {
+        "BOSS" -> 3
+        "METIN" -> 2
+        "EXP" -> 1
+        else -> 0
+    }
+
+    private fun clearCoreTarget() {
+        coreTargetKind = ""
+        coreTargetName = ""
+        coreTargetX = 0
+        coreTargetY = 0
+        coreTargetSeenAt = 0L
+        coreTargetMisses = 0
+        coreTargetLockedAt = 0L
+        routeTargetObservedAt = 0L
+        routeBestTargetError = Float.MAX_VALUE
+    }
+
+    private fun lockCoreTarget(candidate: OcrTargetCandidate, now: Long = System.currentTimeMillis()) {
+        val changed = coreTargetKind != candidate.kind || coreTargetName != candidate.name
+        coreTargetKind = candidate.kind
+        coreTargetName = candidate.name
+        coreTargetX = candidate.targetX
+        coreTargetY = candidate.targetY
+        coreTargetSeenAt = now
+        coreTargetMisses = 0
+        if (changed || coreTargetLockedAt == 0L) {
+            coreTargetLockedAt = now
+            routeTargetObservedAt = now
+            routeBestTargetError = Float.MAX_VALUE
+        }
+        if (candidate.kind == "EXP") {
+            expLockActive = true
+            expLockName = candidate.name
+            expLockX = candidate.targetX
+            expLockY = candidate.targetY
+            expLockSeenAt = now
+            expLockMisses = 0
+        } else {
+            clearExpLock()
+        }
+    }
+
+    private fun sameLockedTarget(candidate: OcrTargetCandidate): Boolean {
+        if (coreTargetKind.isBlank() || candidate.kind != coreTargetKind) return false
+        val dx = candidate.targetX - coreTargetX
+        val dy = candidate.targetY - coreTargetY
+        val maxDistance = if (candidate.kind == "EXP") 260 else 330
+        val nearPreviousPosition = dx * dx + dy * dy < maxDistance * maxDistance
+        if (!nearPreviousPosition) return false
+        return coreTargetName.isBlank() || candidate.name == coreTargetName || candidate.kind != "EXP"
+    }
+
+    private fun isPlausibleExpWorldLabel(raw: String, normalized: String, box: Rect, w: Int, h: Int): Boolean {
+        if (normalized.length < 3) return false
+        if (!normalized.any { it.isLetter() }) return false
+        if (raw.contains("@") || raw.contains("|") || raw.contains("[") || raw.contains("]")) return false
+        if (raw.count { it.isDigit() } > raw.length / 2) return false
+        if (box.centerY() < h * 0.12f || box.centerY() > h * 0.62f) return false
+        if (box.centerX() < w * 0.11f || box.centerX() > w * 0.89f) return false
+        if (box.width() > w * 0.25f || box.height() > h * 0.075f) return false
+
+        val compact = normalized
+            .replace("-", " ")
+            .replace(".", " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        val noiseTokens = listOf(
+            "elderbot", "szukam", "poziom", "yang", "sell", "sprzedam", "kupie",
+            "kupię", "expie", "pw", "pz", "pe", "hp", "lv", "lvl", "cena", "sm"
+        )
+        return noiseTokens.none { token ->
+            compact == token || compact.startsWith("$token ") || compact.contains(" $token ")
+        }
+    }
+
     private fun detectMetinWithOcr(bitmap: Bitmap, onResult: (MetinDetection) -> Unit) {
         val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
         val image = InputImage.fromBitmap(bitmap, 0)
@@ -525,83 +652,190 @@ class BotAccessibilityService : AccessibilityService() {
                     (h * 0.82f).toInt()
                 )
 
-                var bestBox: Rect? = null
-                var bestScore = Int.MIN_VALUE
-                var bestKind = "METIN"
+                val expMode = enabled("auto_exp", false)
+                val bossMode = enabled("auto_boss", true)
+                val metinMode = enabled("farmbot", true)
+                val bossNames = listOf(
+                    "lykos", "scrofa", "bera", "tigris",
+                    "cung mok", "junghyul", "jug hyul", "mi jung", "se rang", "jin hee",
+                    "mahon", "bo", "goo pae", "chuong", "best kapitan", "bestialski kapitan"
+                )
+
+                val candidates = mutableListOf<OcrTargetCandidate>()
+                val playerX = w * 0.50f
+                val playerY = h * 0.48f
 
                 for (block in text.textBlocks) {
                     for (line in block.lines) {
                         val raw = line.text.trim()
                         val normalized = normalizeGameText(raw)
                         updateMapFromText(normalized)
-                        val box = line.boundingBox ?: continue
-                        if (!box.intersect(gameplay)) continue
+                        val originalBox = line.boundingBox ?: continue
+                        val box = Rect(originalBox)
+                        if (!Rect.intersects(box, gameplay)) continue
+
+                        val compact = normalized
+                            .replace("-", " ")
+                            .replace(".", " ")
+                            .replace(Regex("\\s+"), " ")
+                            .trim()
+
                         val redScore = countRedPixelsNear(bitmap, box)
-                        val expMode = enabled("auto_exp", false)
-                        val bossMode = enabled("auto_boss", true)
-                        val isMetin = normalized.contains("metin")
-                        val bossNames = listOf(
-                            "lykos", "scrofa", "bera", "tigris",
-                            "cung mok", "junghyul", "jug hyul", "mi jung", "se rang", "jin hee",
-                            "mahon", "bo", "goo pae", "chuong", "best kapitan", "bestialski kapitan"
+                        val isMetin = metinMode && compact.contains("metin")
+                        val isBoss = bossMode && bossNames.any { boss ->
+                            compact == boss || compact.startsWith("$boss ") || compact.contains(" $boss ")
+                        }
+                        val isExpCandidate = expMode &&
+                            !isMetin &&
+                            !isBoss &&
+                            redScore > 12 &&
+                            isPlausibleExpWorldLabel(raw, normalized, box, w, h)
+
+                        if (!isBoss && !isMetin && !isExpCandidate) continue
+
+                        val kind = when {
+                            isBoss -> "BOSS"
+                            isMetin -> "METIN"
+                            else -> "EXP"
+                        }
+
+                        val bodyOffset = if (kind == "EXP") {
+                            (box.height() * 4).coerceIn(58, 92)
+                        } else {
+                            65
+                        }
+                        val targetX = box.centerX()
+                        val targetY = (box.bottom + bodyOffset).coerceAtMost(gameplay.bottom)
+
+                        val ddx = targetX - playerX
+                        val ddy = targetY - playerY
+                        val distance = kotlin.math.sqrt(ddx * ddx + ddy * ddy).toFloat()
+
+                        candidates.add(
+                            OcrTargetCandidate(
+                                name = compact,
+                                kind = kind,
+                                label = Rect(box),
+                                targetX = targetX,
+                                targetY = targetY,
+                                redScore = redScore,
+                                playerDistance = distance
+                            )
                         )
-                        val compact = normalized.replace("-", " ").replace(".", " ").replace(Regex("\\s+"), " ").trim()
-                        val isBoss = bossNames.any { compact.contains(it) }
-                        val uiNoise = normalized.contains("yang") || normalized.contains("poziom") ||
-                            normalized.contains("elderbot") || normalized.contains("szukam") || normalized.length < 3
-                        // EXP targets must be actual red world labels in the upper gameplay area.
-                        // This deliberately rejects chat text near the bottom of the screen.
-                        val isExpCandidate = expMode && !uiNoise && redScore > 18 && box.centerY() < (h * 0.62f)
-                        if (!(isBoss && bossMode) && !isMetin && !isExpCandidate) continue
-
-                        val labelWidth = box.width().coerceAtLeast(1)
-                        val labelHeight = box.height().coerceAtLeast(1)
-                        val sizeScore = 100 - kotlin.math.abs(labelWidth - 90) - kotlin.math.abs(labelHeight - 18) * 2
-                        val priority = when {
-                            isBoss && bossMode -> 20000
-                            isMetin -> 10000
-                            else -> 0
-                        }
-                        // For ordinary EXP mobs choose the closest visible label to the player,
-                        // not the reddest/largest OCR line. Boss and Metin priorities stay above EXP.
-                        val playerX = w * 0.50f
-                        val playerY = h * 0.48f
-                        val ddx = box.centerX() - playerX
-                        val ddy = (box.bottom + 65) - playerY
-                        val screenDistance = kotlin.math.sqrt(ddx * ddx + ddy * ddy)
-                        val expDistanceScore = if (priority == 0) (5000f - screenDistance).toInt() else 0
-                        val score = priority + expDistanceScore + redScore * 2 + sizeScore
-
-                        if (score > bestScore) {
-                            bestScore = score
-                            bestBox = Rect(box)
-                            bestKind = when { isBoss -> "BOSS"; isMetin -> "METIN"; else -> "EXP" }
-                        }
                     }
                 }
 
-                val label = bestBox
-                if (label == null) {
+                val now = System.currentTimeMillis()
+
+                fun deliver(candidate: OcrTargetCandidate, refreshLock: Boolean = true) {
+                    if (refreshLock) lockCoreTarget(candidate, now)
+                    lastTargetKind = candidate.kind
+                    lastDetectedName = candidate.name
+                    lastDetectedLabelBottom = candidate.label.bottom
+                    lastDetectedLabelHeight = candidate.label.height()
+                    lastDetectedX = candidate.targetX
+                    lastDetectedY = candidate.targetY
+
+                    val left = (candidate.targetX - 65).coerceAtLeast(gameplay.left)
+                    val right = (candidate.targetX + 65).coerceAtMost(gameplay.right)
+                    val top = (candidate.targetY - 48).coerceAtLeast(gameplay.top)
+                    val bottom = (candidate.targetY + 48).coerceAtMost(gameplay.bottom)
+                    recognizer.close()
+                    onResult(
+                        MetinDetection(
+                            true,
+                            Rect(left, top, right, bottom),
+                            candidate.targetX,
+                            candidate.targetY
+                        )
+                    )
+                }
+
+                // V0.20 target queue policy: keep the current target stable, but allow a
+                // higher-priority target (Boss > Metin > EXP) to pre-empt only before combat.
+                if (coreTargetKind.isNotBlank()) {
+                    val higher = if (!attackMode) {
+                        candidates
+                            .filter { targetPriority(it.kind) > targetPriority(coreTargetKind) }
+                            .sortedWith(compareByDescending<OcrTargetCandidate> { targetPriority(it.kind) }
+                                .thenBy { it.playerDistance })
+                            .firstOrNull()
+                    } else null
+
+                    if (higher != null) {
+                        lockCoreTarget(higher, now)
+                        coreState = CoreState.TARGET_APPROACH
+                        deliver(higher, refreshLock = false)
+                        return@addOnSuccessListener
+                    }
+
+                    val lockedPool = candidates.filter { sameLockedTarget(it) }
+                    val locked = lockedPool.minByOrNull {
+                        val dx = it.targetX - coreTargetX
+                        val dy = it.targetY - coreTargetY
+                        dx * dx + dy * dy
+                    }
+
+                    if (locked != null) {
+                        coreTargetX = locked.targetX
+                        coreTargetY = locked.targetY
+                        coreTargetSeenAt = now
+                        coreTargetMisses = 0
+                        if (locked.kind == "EXP") {
+                            expLockActive = true
+                            expLockName = locked.name
+                            expLockX = locked.targetX
+                            expLockY = locked.targetY
+                            expLockSeenAt = now
+                            expLockMisses = 0
+                        }
+                        deliver(locked, refreshLock = false)
+                        return@addOnSuccessListener
+                    }
+
+                    coreTargetMisses++
+                    if (coreTargetKind == "EXP") expLockMisses++
+                    if (coreTargetMisses <= 3 && now - coreTargetSeenAt < 2400L) {
+                        recognizer.close()
+                        onResult(MetinDetection(false, Rect(), 0, 0))
+                        return@addOnSuccessListener
+                    }
+
+                    clearCoreTarget()
+                    clearExpLock()
+                    if (attackMode) {
+                        recognizer.close()
+                        onResult(MetinDetection(false, Rect(), 0, 0))
+                        return@addOnSuccessListener
+                    }
+                }
+
+                // Build a deterministic queue from everything visible in this frame.
+                // Same-priority targets are ordered by visual distance to the character.
+                val best = candidates
+                    .sortedWith(compareByDescending<OcrTargetCandidate> { targetPriority(it.kind) }
+                        .thenBy { it.playerDistance })
+                    .firstOrNull()
+
+                if (best == null) {
                     recognizer.close()
                     onResult(MetinDetection(false, Rect(), 0, 0))
                     return@addOnSuccessListener
                 }
 
-                lastTargetKind = bestKind
-
-                // The label is above the target. Use a generous, colour-independent target area
-                // below the text so different Metin auras do not affect detection.
-                val left = (label.centerX() - 65).coerceAtLeast(gameplay.left)
-                val right = (label.centerX() + 65).coerceAtMost(gameplay.right)
-                val top = (label.bottom + 5).coerceAtMost(gameplay.bottom - 20)
-                val bottom = (label.bottom + 125).coerceAtMost(gameplay.bottom)
-                val target = Rect(left, top, right, bottom)
-
-                recognizer.close()
-                onResult(MetinDetection(true, target, target.centerX(), target.centerY()))
+                lockCoreTarget(best, now)
+                coreState = CoreState.TARGET_APPROACH
+                lastMoveX = 0f
+                lastMoveY = 0f
+                desiredMoveX = 0f
+                desiredMoveY = 0f
+                steeringUpdatedAt = 0L
+                resetProgressWatch()
+                deliver(best, refreshLock = false)
             }
             .addOnFailureListener {
                 recognizer.close()
+                if (expLockActive) expLockMisses++
                 onResult(MetinDetection(false, Rect(), 0, 0))
             }
     }
@@ -1015,10 +1249,15 @@ class BotAccessibilityService : AccessibilityService() {
     private fun beginAttackMode() {
         if (!running || attackMode) return
         attackMode = true
+        coreState = CoreState.COMBAT
         attackMisses = 0
         desiredMoveX = 0f
         desiredMoveY = 0f
-        lastStatus = "Metin wybrany — ATAK"
+        lastStatus = when (lastTargetKind) {
+            "BOSS" -> "Boss wybrany — ATAK"
+            "EXP" -> "Mob namierzony — ATAK"
+            else -> "Metin wybrany — ATAK"
+        }
         setOverlaySymbol("⚔")
 
         finishJoystickGesture {
@@ -1040,16 +1279,29 @@ class BotAccessibilityService : AccessibilityService() {
         if (!running) return
         attackMode = false
         attackMisses = 0
+        coreState = CoreState.PICKUP
         mainHandler.removeCallbacks(attackLoop)
         setOverlaySymbol("…")
-        lastStatus = "Metin zbity — podnoszę drop"
+        val finishedKind = lastTargetKind
+        clearCoreTarget()
+        if (finishedKind == "EXP") clearExpLock()
+        lastStatus = when (finishedKind) {
+            "BOSS" -> "Boss pokonany — podnoszę drop"
+            "EXP" -> "Mob pokonany — podnoszę drop"
+            else -> "Metin zbity — podnoszę drop"
+        }
         pickupPass = 0
         if (!enabled("pickup")) {
             missCount = 0
             desiredMoveX = 0f
             desiredMoveY = 0f
+            coreState = CoreState.SEARCH_ROUTE
             setOverlaySymbol("■")
-            lastStatus = "Pickup wyłączony — szukam następnego Metina"
+            lastStatus = when (finishedKind) {
+                "EXP" -> "Pickup wyłączony — szukam następnego moba"
+                "BOSS" -> "Pickup wyłączony — szukam kolejnego celu"
+                else -> "Pickup wyłączony — szukam następnego Metina"
+            }
             mainHandler.postDelayed({ farmTick() }, 400L)
             return
         }
@@ -1058,8 +1310,13 @@ class BotAccessibilityService : AccessibilityService() {
             missCount = 0
             desiredMoveX = 0f
             desiredMoveY = 0f
+            coreState = CoreState.SEARCH_ROUTE
             setOverlaySymbol("■")
-            lastStatus = "Szukam następnego Metina..."
+            lastStatus = when (finishedKind) {
+                "EXP" -> "Auto EXP: szukam następnego moba..."
+                "BOSS" -> "Szukam kolejnego bossa / Metina..."
+                else -> "Szukam następnego Metina..."
+            }
             mainHandler.postDelayed({ farmTick() }, 500L)
         }
     }
@@ -1069,21 +1326,103 @@ class BotAccessibilityService : AccessibilityService() {
      * Red labels are usually enemies, while drop labels in the supplied game
      * screenshots are non-red.  This avoids blindly tapping the whole screen.
      */
+    private fun pickupHandLooksVisible(bitmap: Bitmap): Boolean {
+        // Calibrated from the two ElderMT2 screenshots supplied by the user:
+        // the pickup hand appears around 83% W / 49.4% H as a dark round button
+        // with a small bright hand glyph. No game data is read.
+        val cx = (bitmap.width * 0.830f).toInt()
+        val cy = (bitmap.height * 0.494f).toInt()
+        val radius = (bitmap.height * 0.055f).toInt().coerceAtLeast(22)
+        var bright = 0
+        var dark = 0
+        var total = 0
+        for (y in (cy - radius).coerceAtLeast(0)..(cy + radius).coerceAtMost(bitmap.height - 1) step 2) {
+            for (x in (cx - radius).coerceAtLeast(0)..(cx + radius).coerceAtMost(bitmap.width - 1) step 2) {
+                val dx = x - cx
+                val dy = y - cy
+                if (dx * dx + dy * dy > radius * radius) continue
+                val c = bitmap.getPixel(x, y)
+                val r = android.graphics.Color.red(c)
+                val g = android.graphics.Color.green(c)
+                val b = android.graphics.Color.blue(c)
+                val max = maxOf(r, g, b)
+                val min = minOf(r, g, b)
+                val avg = (r + g + b) / 3
+                if (avg < 88) dark++
+                if (max > 175 && max - min < 85) bright++
+                total++
+            }
+        }
+        if (total == 0) return false
+        val brightRatio = bright.toFloat() / total.toFloat()
+        val darkRatio = dark.toFloat() / total.toFloat()
+        return brightRatio > 0.0045f && darkRatio > 0.14f
+    }
+
+    private fun capturePickupHandVisible(onDone: (Boolean) -> Unit) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) { onDone(false); return }
+        try {
+            takeScreenshot(
+                android.view.Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        var bitmap: Bitmap? = null
+                        try {
+                            val buffer = screenshot.hardwareBuffer
+                            try {
+                                val hw = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                                    ?: throw IllegalStateException("Brak obrazu pickup")
+                                bitmap = hw.copy(Bitmap.Config.ARGB_8888, false)
+                                hw.recycle()
+                            } finally {
+                                buffer.close()
+                            }
+                            onDone(bitmap?.let { pickupHandLooksVisible(it) } == true)
+                        } catch (_: Throwable) {
+                            onDone(false)
+                        } finally {
+                            bitmap?.recycle()
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) { onDone(false) }
+                }
+            )
+        } catch (_: Throwable) {
+            onDone(false)
+        }
+    }
+
     private fun captureAndPickupLoot(onDone: () -> Unit) {
-        // ElderMT2 exposes a hand button only while loot is in pickup range.
-        // On the supplied 1536x709 layout its center is ~83.0% W / 49.4% H.
-        // Repeated taps are intentional: each tap picks the next available item.
         val m = resources.displayMetrics
         val x = m.widthPixels * 0.830f
         val y = m.heightPixels * 0.494f
         pickupPass = 0
+        pickupAbsentFrames = 0
+        coreState = CoreState.PICKUP
+
         fun next() {
             if (!running || !enabled("pickup")) { onDone(); return }
-            if (pickupPass >= 12) { onDone(); return }
-            pickupPass++
-            lastStatus = "Pickup ręką: $pickupPass/12"
-            safeUtilityTap(x, y)
-            mainHandler.postDelayed({ next() }, 330L)
+            if (pickupPass >= 18) { onDone(); return }
+            capturePickupHandVisible { visible ->
+                if (!running) return@capturePickupHandVisible
+                if (visible) {
+                    pickupAbsentFrames = 0
+                    pickupPass++
+                    lastStatus = "Pickup: ręka widoczna • $pickupPass"
+                    safeUtilityTap(x, y)
+                    mainHandler.postDelayed({ next() }, 300L)
+                } else {
+                    pickupAbsentFrames++
+                    lastStatus = "Pickup: sprawdzam drop..."
+                    if (pickupAbsentFrames >= 2) {
+                        onDone()
+                    } else {
+                        mainHandler.postDelayed({ next() }, 280L)
+                    }
+                }
+            }
         }
         next()
     }
@@ -1167,6 +1506,10 @@ class BotAccessibilityService : AccessibilityService() {
 
     private fun checkAutoSkills(bitmap: Bitmap) {
         if (!enabled("auto_skills")) return
+        // Skills are support actions, never navigation actions. In V0.20 they are pressed
+        // only during COMBAT, so Auto Skills cannot cancel the joystick while searching
+        // or approaching a target.
+        if (coreState != CoreState.COMBAT) return
         val slots = Array(3) { i ->
             val defaultSlots = arrayOf(0.870f to 0.590f, 0.922f to 0.595f, 0.831f to 0.640f)
             prefs().getFloat("skill_${i}_x", defaultSlots[i].first) to
@@ -1174,11 +1517,11 @@ class BotAccessibilityService : AccessibilityService() {
         }
         val now = System.currentTimeMillis()
         for (i in slots.indices) {
-            if (now - skillLastTapAt[i] < 1400L) continue
+            if (now - skillLastTapAt[i] < 2600L) continue
             val (x, y) = slots[i]
             if (skillLooksReady(bitmap, x, y)) {
                 skillLastTapAt[i] = now
-                tapAt(bitmap.width * x, bitmap.height * y, 70L)
+                safeUtilityTap(bitmap.width * x, bitmap.height * y)
                 lastStatus = "Auto Skill ${i + 1}"
                 break
             }
@@ -1360,6 +1703,9 @@ class BotAccessibilityService : AccessibilityService() {
         avoidAttempts = 0
         resetProgressWatch()
         patrolStepUntil = 0L
+        clearCoreTarget()
+        clearExpLock()
+        coreState = CoreState.SEARCH_ROUTE
         lastStatus = "Cel niedostępny — wracam na trasę"
         setOverlaySymbol("↻")
     }
@@ -1460,154 +1806,226 @@ class BotAccessibilityService : AccessibilityService() {
             val m = resources.displayMetrics
             val w = m.widthPixels.toFloat()
             val h = m.heightPixels.toFloat()
+            val now = System.currentTimeMillis()
 
+            // COMBAT is isolated from target acquisition. While fighting, OCR may refresh the
+            // locked target, but the bot never jumps to a different mob just because it appeared.
             if (attackMode) {
+                coreState = CoreState.COMBAT
                 if (found) {
                     attackMisses = 0
-                    if (System.currentTimeMillis() - lastTargetTapAt > 1800L) {
-                        tapDetectedMetin()
+                    if (now - lastTargetTapAt > 1800L) tapDetectedMetin()
+                    lastStatus = when (lastTargetKind) {
+                        "BOSS" -> "Walka: boss / miniboss"
+                        "EXP" -> "Walka: ${if (lastDetectedName.isBlank()) "mob" else lastDetectedName}"
+                        else -> "Walka: Metin"
                     }
-                    lastStatus = when (lastTargetKind) { "BOSS" -> "Biję bossa / minibossa..."; "EXP" -> "Auto EXP: walczę..."; else -> "Biję Metina do końca..." }
-                    mainHandler.postDelayed({ farmTick() }, 560L)
+                    mainHandler.postDelayed({ farmTick() }, 540L)
                 } else {
                     attackMisses++
-                    lastStatus = "Sprawdzam czy cel padł... ($attackMisses/4)"
-                    if (attackMisses >= 4) {
-                        finishAttackAndPickup()
-                    } else {
-                        mainHandler.postDelayed({ farmTick() }, 520L)
-                    }
+                    lastStatus = "Walka: sprawdzam cel ($attackMisses/4)"
+                    if (attackMisses >= 4) finishAttackAndPickup()
+                    else mainHandler.postDelayed({ farmTick() }, 500L)
                 }
                 return@captureAndDetectMetin
             }
 
             if (!found) {
-                resetProgressWatch()
-                missCount++
-
-                if (applyAvoidanceStep()) {
-                    mainHandler.postDelayed({ farmTick() }, 470L)
+                // A short OCR dropout must not immediately destroy the target lock. Stop movement
+                // for a moment, reacquire, and only then fall back to the route.
+                if (coreTargetKind.isNotBlank() && coreTargetMisses in 1..3) {
+                    coreState = CoreState.TARGET_APPROACH
+                    desiredMoveX = 0f
+                    desiredMoveY = 0f
+                    lastMoveX = 0f
+                    lastMoveY = 0f
+                    expRangeConfirmFrames = 0
+                    lastStatus = "Cel chwilowo zgubiony • ponawiam namierzanie"
+                    setOverlaySymbol("◎")
+                    mainHandler.postDelayed({ farmTick() }, 260L)
                     return@captureAndDetectMetin
                 }
 
-                lastStatus = when { enabled("auto_boss", true) -> "Szukam: bossy > Metiny > EXP..."; enabled("auto_exp", false) -> "Auto EXP: szukam mobów..."; else -> "Szukam Metina na trasie..." }
+                clearCoreTarget()
+                clearExpLock()
+                resetProgressWatch()
+                missCount++
+                coreState = CoreState.SEARCH_ROUTE
+
+                if (applyAvoidanceStep()) {
+                    coreState = CoreState.RECOVER
+                    mainHandler.postDelayed({ farmTick() }, 450L)
+                    return@captureAndDetectMetin
+                }
+
                 if (missCount >= 2) {
                     applyPatrolRoute()
                 } else {
-                    // Do not hard-stop after a single missed OCR frame.
-                    desiredMoveX = lastMoveX * 0.92f
-                    desiredMoveY = lastMoveY * 0.92f
+                    desiredMoveX = lastMoveX * 0.90f
+                    desiredMoveY = lastMoveY * 0.90f
                 }
-                mainHandler.postDelayed({ farmTick() }, 560L)
+                lastStatus = when {
+                    enabled("auto_boss", true) && enabled("farmbot") && enabled("auto_exp", false) ->
+                        "Trasa • skan: BOSS > METIN > EXP"
+                    enabled("auto_boss", true) && enabled("farmbot") ->
+                        "Trasa • skan: BOSS > METIN"
+                    enabled("auto_exp", false) -> "Trasa • Auto EXP szuka mobów"
+                    else -> "Trasa • szukam celu"
+                }
+                mainHandler.postDelayed({ farmTick() }, 540L)
                 return@captureAndDetectMetin
             }
 
             missCount = 0
+            coreState = CoreState.TARGET_APPROACH
             val dx = lastDetectedX - w * 0.50f
             val dy = lastDetectedY - h * 0.48f
+            val isExpTarget = lastTargetKind == "EXP"
+            val approachError = kotlin.math.sqrt((dx / w) * (dx / w) + (dy / h) * (dy / h)).toFloat()
 
             if (isIgnoredTarget(w, h)) {
+                clearCoreTarget()
+                clearExpLock()
+                coreState = CoreState.SEARCH_ROUTE
                 applyPatrolRoute()
-                mainHandler.postDelayed({ farmTick() }, 560L)
+                mainHandler.postDelayed({ farmTick() }, 540L)
                 return@captureAndDetectMetin
             }
 
             if (applyAvoidanceStep()) {
-                mainHandler.postDelayed({ farmTick() }, 470L)
+                coreState = CoreState.RECOVER
+                mainHandler.postDelayed({ farmTick() }, 450L)
                 return@captureAndDetectMetin
             }
 
-            // SAFE APPROACH V0.16: a distant OCR target no longer controls the joystick.
-            // We stay on the map route until the Metin enters a conservative capture corridor.
-            // This prevents a Metin visible behind a hill/river/rock from pulling the character
-            // straight into collision geometry.
-            val isExpTarget = lastTargetKind == "EXP"
-            val inCaptureCorridor = kotlin.math.abs(dx) < w * 0.24f && dy > -h * 0.20f && dy < h * 0.28f
-            // Metins/bosses keep the conservative route approach. EXP is intentionally local:
-            // when a red mob label is visible, walk to that mob instead of continuing patrol.
+            // Bosses and Metins are allowed to influence steering only after the normal route
+            // has brought them into a conservative capture corridor. A distant target behind
+            // terrain therefore cannot drag the character straight into a wall.
+            val inCaptureCorridor = kotlin.math.abs(dx) < w * 0.24f &&
+                dy > -h * 0.20f && dy < h * 0.28f
+
             if (!isExpTarget && !inCaptureCorridor) {
-                resetProgressWatch()
-                applyPatrolRoute()
-                lastStatus = "${currentMapLabel}: $lastTargetKind widoczny • trzymam bezpieczną trasę"
+                if (routeTargetObservedAt == 0L) routeTargetObservedAt = now
+                if (approachError < routeBestTargetError - 0.012f) {
+                    routeBestTargetError = approachError
+                    lastMeaningfulProgressAt = now
+                }
+                if (lastMeaningfulProgressAt == 0L) lastMeaningfulProgressAt = now
+
+                val stalled = now - lastMeaningfulProgressAt > 6500L
+                val heldTooLong = coreTargetLockedAt > 0L && now - coreTargetLockedAt > 14000L
+                if (stalled || heldTooLong) {
+                    ignoredTargetX = lastDetectedX
+                    ignoredTargetY = lastDetectedY
+                    ignoreTargetUntil = now + 9000L
+                    clearCoreTarget()
+                    clearExpLock()
+                    coreState = CoreState.SEARCH_ROUTE
+                    resetProgressWatch()
+                    applyPatrolRoute()
+                    lastStatus = "$lastTargetKind poza bezpiecznym dojściem • wracam na trasę"
+                    mainHandler.postDelayed({ farmTick() }, 520L)
+                    return@captureAndDetectMetin
+                }
+
+                applyPatrolRoute(now)
+                lastStatus = "$lastTargetKind zablokowany • trasa zbliża do celu"
                 setOverlaySymbol("◇")
-                mainHandler.postDelayed({ farmTick() }, 540L)
+                mainHandler.postDelayed({ farmTick() }, 520L)
                 return@captureAndDetectMetin
             }
 
             setOverlaySymbol("■")
 
-            // EXP needs a tighter attack gate so the sword is not pressed while the mob is
-            // merely visible in the distance. Metins/bosses keep the previous capture range.
+            // Attack is a separate state and requires a confirmed close-range position.
             val aligned = kotlin.math.abs(dx) < w * (if (isExpTarget) 0.075f else 0.105f)
             val attackRangeOnScreen = if (isExpTarget) {
                 dy > -h * 0.075f && dy < h * 0.12f
             } else {
                 dy > -h * 0.13f && dy < h * 0.20f
             }
+
             if (aligned && attackRangeOnScreen) {
-                resetProgressWatch()
-                avoidPhase = 0
-                avoidPhaseTicks = 0
                 desiredMoveX = 0f
                 desiredMoveY = 0f
-                beginAttackMode()
-                mainHandler.postDelayed({ farmTick() }, 520L)
-                return@captureAndDetectMetin
-            }
+                lastMoveX = 0f
+                lastMoveY = 0f
 
-            val now = System.currentTimeMillis()
-            val commanded = kotlin.math.sqrt(
-                desiredMoveX * desiredMoveX + desiredMoveY * desiredMoveY
-            )
-            val approachError = kotlin.math.sqrt(
-                (dx / w) * (dx / w) + (dy / h) * (dy / h)
-            )
-
-            if (commanded > 0.30f) {
-                if (progressAnchorAt == 0L) {
-                    progressAnchorAt = now
-                    progressAnchorX = lastDetectedX
-                    progressAnchorY = lastDetectedY
-                    bestApproachError = approachError
-                    lastMeaningfulProgressAt = now
-                } else {
-                    // Real progress means the target is getting closer to the attack zone,
-                    // not merely that pixels/camera/animation changed.
-                    if (approachError < bestApproachError - 0.022f) {
-                        bestApproachError = approachError
-                        lastMeaningfulProgressAt = now
-                        progressAnchorX = lastDetectedX
-                        progressAnchorY = lastDetectedY
-                        avoidAttempts = 0
-                        rewardCurrentDirection()
-                    }
-
-                    val noRealProgressFor = now - lastMeaningfulProgressAt
-                    val hardTimeout = now - progressAnchorAt
-                    if (noRealProgressFor >= 2200L || hardTimeout >= 4600L) {
-                        if (avoidAttempts >= 3) {
-                            ignoreCurrentTargetAndResumeRoute()
-                            applyPatrolRoute()
-                            mainHandler.postDelayed({ farmTick() }, 560L)
-                        } else {
-                            beginAvoidance(dx)
-                            applyAvoidanceStep()
-                            mainHandler.postDelayed({ farmTick() }, 500L)
-                        }
+                if (isExpTarget) {
+                    expRangeConfirmFrames++
+                    if (expRangeConfirmFrames < 2) {
+                        lastStatus = "Auto EXP: potwierdzam zasięg"
+                        mainHandler.postDelayed({ farmTick() }, 230L)
                         return@captureAndDetectMetin
                     }
                 }
-            } else {
+
                 resetProgressWatch()
+                avoidPhase = 0
+                avoidPhaseTicks = 0
+                beginAttackMode()
+                mainHandler.postDelayed({ farmTick() }, 500L)
+                return@captureAndDetectMetin
+            }
+            if (isExpTarget) expRangeConfirmFrames = 0
+
+            // During TARGET_APPROACH, monitor actual progress toward the attack zone. If the
+            // target is not getting closer, run a bounded detour and finally abandon it.
+            val commanded = kotlin.math.sqrt(desiredMoveX * desiredMoveX + desiredMoveY * desiredMoveY)
+            if (progressAnchorAt == 0L) {
+                progressAnchorAt = now
+                progressAnchorX = lastDetectedX
+                progressAnchorY = lastDetectedY
+                bestApproachError = approachError
+                lastMeaningfulProgressAt = now
+            } else if (approachError < bestApproachError - 0.018f) {
+                bestApproachError = approachError
+                lastMeaningfulProgressAt = now
+                progressAnchorX = lastDetectedX
+                progressAnchorY = lastDetectedY
+                avoidAttempts = 0
+                rewardCurrentDirection()
             }
 
+            if (commanded > 0.26f) {
+                val noProgressLimit = if (isExpTarget) 1750L else 2300L
+                val hardLimit = if (isExpTarget) 4200L else 5200L
+                val noRealProgressFor = now - lastMeaningfulProgressAt
+                val hardTimeout = now - progressAnchorAt
+                if (noRealProgressFor >= noProgressLimit || hardTimeout >= hardLimit) {
+                    val maxAvoidAttempts = if (isExpTarget) 2 else 3
+                    if (avoidAttempts >= maxAvoidAttempts) {
+                        ignoredTargetX = lastDetectedX
+                        ignoredTargetY = lastDetectedY
+                        ignoreTargetUntil = now + if (isExpTarget) 5500L else 10000L
+                        clearCoreTarget()
+                        clearExpLock()
+                        coreState = CoreState.SEARCH_ROUTE
+                        desiredMoveX = 0f
+                        desiredMoveY = 0f
+                        resetProgressWatch()
+                        lastStatus = "Cel niedostępny • pomijam i wracam na trasę"
+                        mainHandler.postDelayed({ farmTick() }, 340L)
+                    } else {
+                        coreState = CoreState.RECOVER
+                        beginAvoidance(dx)
+                        applyAvoidanceStep()
+                        mainHandler.postDelayed({ farmTick() }, 480L)
+                    }
+                    return@captureAndDetectMetin
+                }
+            }
+
+            // Final local approach. EXP receives faster steering because nearby mobs move;
+            // Metins/Bosses are smoothed more strongly to avoid oscillation.
             val targetX = (dx / (w * 0.30f)).coerceIn(-0.86f, 0.86f)
             val targetY = (dy / (h * 0.31f)).coerceIn(-0.90f, 0.90f)
-            // Steering is intentionally low-pass filtered and not rewritten on every OCR frame.
-            // This removes the left-right twitching that made movement look robotic.
-            if (now - steeringUpdatedAt >= 850L) {
-                val moveX = (lastMoveX * 0.84f + targetX * 0.16f).coerceIn(-0.86f, 0.86f)
-                val moveY = (lastMoveY * 0.84f + targetY * 0.16f).coerceIn(-0.90f, 0.90f)
+            val steerInterval = if (isExpTarget) 300L else 760L
+            val oldWeight = if (isExpTarget) 0.36f else 0.78f
+            val newWeight = 1f - oldWeight
+            if (now - steeringUpdatedAt >= steerInterval) {
+                val moveX = (lastMoveX * oldWeight + targetX * newWeight).coerceIn(-0.86f, 0.86f)
+                val moveY = (lastMoveY * oldWeight + targetY * newWeight).coerceIn(-0.90f, 0.90f)
                 lastMoveX = if (kotlin.math.abs(moveX) < 0.035f) 0f else moveX
                 lastMoveY = if (kotlin.math.abs(moveY) < 0.035f) 0f else moveY
                 desiredMoveX = lastMoveX
@@ -1615,8 +2033,12 @@ class BotAccessibilityService : AccessibilityService() {
                 steeringUpdatedAt = now
             }
 
-            lastStatus = if (isExpTarget) "Auto EXP: podchodzę do najbliższego moba" else "Podejście po trasie: X=${dx.toInt()} Y=${dy.toInt()}"
-            mainHandler.postDelayed({ farmTick() }, 520L)
+            lastStatus = when (lastTargetKind) {
+                "BOSS" -> "Podejście: BOSS • ${if (lastDetectedName.isBlank()) "cel" else lastDetectedName}"
+                "METIN" -> "Podejście: METIN • ${if (lastDetectedName.isBlank()) "cel" else lastDetectedName}"
+                else -> "Auto EXP: LOCK • ${if (lastDetectedName.isBlank()) "mob" else lastDetectedName}"
+            }
+            mainHandler.postDelayed({ farmTick() }, 500L)
         }
     }
 
@@ -1657,6 +2079,12 @@ class BotAccessibilityService : AccessibilityService() {
         currentMapId = prefs().getString("last_map_id", currentMapId) ?: currentMapId
         currentMapLabel = prefs().getString("last_map_label", currentMapLabel) ?: currentMapLabel
         lastSafeHeadingBucket = -1
+        clearCoreTarget()
+        clearExpLock()
+        coreState = CoreState.SEARCH_ROUTE
+        lastDetectedName = ""
+        lastDetectedLabelBottom = 0
+        lastDetectedLabelHeight = 0
         running = true
         lastStatus = if (enabled("auto_exp", false)) "ElderBot: AUTO EXP — szukam mobów..." else "ElderBot: SZUKAM METINA..."
         setOverlaySymbol("■")
@@ -1681,6 +2109,12 @@ class BotAccessibilityService : AccessibilityService() {
         patrolStepUntil = 0L
         ignoreTargetUntil = 0L
         steeringUpdatedAt = 0L
+        clearCoreTarget()
+        clearExpLock()
+        coreState = CoreState.STOPPED
+        lastDetectedName = ""
+        lastDetectedLabelBottom = 0
+        lastDetectedLabelHeight = 0
         mainHandler.removeCallbacks(attackLoop)
         mainHandler.removeCallbacks(movementLoop)
         mainHandler.removeCallbacksAndMessages(null)
